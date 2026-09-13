@@ -100,5 +100,5 @@ echo "[+] Starting Watchdog (auto-restarts sshd/udpgw/bridge if any crash)..."
   done
 ) &
 
-echo "[+] Starting Optimized Nginx..."
-exec nginx -g "daemon off;"
+echo "[+] Starting Caddy..."
+exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
