@@ -1,0 +1,28 @@
+:8080 {
+    encode gzip
+
+    handle /saeka-ssh {
+        reverse_proxy 127.0.0.1:2222 {
+            header_up Upgrade {http.request.header.Upgrade}
+            header_up Connection {http.request.header.Connection}
+            header_up Sec-WebSocket-Key {http.request.header.Sec-WebSocket-Key}
+            header_up Sec-WebSocket-Version {http.request.header.Sec-WebSocket-Version}
+            
+            transport http {
+                dial_timeout 0
+                response_header_timeout 0
+                read_timeout 86400s
+                write_timeout 86400s
+            }
+            
+            keepalive connections 100
+            keepalive idle_conns 50
+        }
+    }
+
+    handle {
+        respond "Saeka Secure GCP Gateway Active." 200 {
+            -type text/plain
+        }
+    }
+}
