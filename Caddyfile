@@ -1,129 +1,23 @@
+{
+    admin off
+    auto_https off
+    servers {
+        protocols h1 h2c
+    }
+}
+
 :8080 {
-    encode gzip
-
-    # Error handling
-    handle_errors {
-        respond "{http.error.status_code} {http.error.status_text}" {http.error.status_code}
-    }
-
-    # Health check endpoint
-    handle /health {
-        respond "OK" 200 {
-            -type text/plain
-        }
-    }
-
-    # WebSocket SSH tunnel - optimized for low latency & no timeout
-    handle /saeka-ssh {
+    handle /boysupot-ssh* {
         reverse_proxy 127.0.0.1:2222 {
-            # WebSocket headers
-            header_up Upgrade {http.request.header.Upgrade}
-            header_up Connection {http.request.header.Connection}
-            header_up Sec-WebSocket-Key {http.request.header.Sec-WebSocket-Key}
-            header_up Sec-WebSocket-Version {http.request.header.Sec-WebSocket-Version}
-            header_up Origin {http.request.header.Origin}
-            header_up Sec-WebSocket-Extensions {http.request.header.Sec-WebSocket-Extensions}
-
-            # Request/Response headers for frontend/backend support
-            header_up X-Real-IP {http.request.header.X-Real-IP}
-            header_up X-Forwarded-For {http.request.remote.host}
-            header_up X-Forwarded-Proto {http.request.proto}
-            header_up X-Forwarded-Host {http.request.header.Host}
-
-            # Performance tuning for fast ping
-            transport http {
-                dial_timeout 3s
-                response_header_timeout 0
-                read_timeout 0
-                write_timeout 0
-                idle_timeout 120s
-                max_response_header_size 16384
-            }
-
-            # Aggressive connection pooling for speed
-            keepalive connections 512
-            keepalive idle_conns 256
-            keepalive max_requests 100000
-            keepalive idle_timeout 300s
-
-            # Disable buffering for real-time, low-latency data
+            # -1 disables Caddy's response buffering delay entirely - every
+            # byte from the tunnel gets flushed to the client immediately
+            # instead of waiting to fill a buffer first. This is the main
+            # lever for killing added latency/ms-jumping at the proxy layer.
             flush_interval -1
-            
-            # Health check for stability
-            unhealthy_uri /health
-            unhealthy_status 500 501 502 503
-            unhealthy_latency 2s
         }
     }
 
-    # Backend API routes - fast response
-    handle /api/* {
-        reverse_proxy 127.0.0.1:3000 {
-            header_up X-Real-IP {http.request.header.X-Real-IP}
-            header_up X-Forwarded-For {http.request.remote.host}
-            header_up X-Forwarded-Proto {http.request.proto}
-            header_up X-Forwarded-Host {http.request.header.Host}
-            
-            # Fast API response times
-            transport http {
-                dial_timeout 2s
-                response_header_timeout 10s
-                read_timeout 120s
-                write_timeout 120s
-                idle_timeout 90s
-            }
-
-            keepalive connections 256
-            keepalive idle_conns 128
-            keepalive max_requests 50000
-            keepalive idle_timeout 90s
-            
-            flush_interval 50ms
-        }
-    }
-
-    # Frontend static files & app
-    handle /* {
-        root * /var/www/html
-        try_files {path} /index.html
-        file_server {
-            precompressed br gzip
-            duration 24h
-        }
-        
-        # Aggressive caching for static assets
-        @static {
-            file
-            path *.js *.css *.woff *.woff2 *.png *.jpg *.jpeg *.gif *.svg *.ico
-        }
-        header @static Cache-Control "public, max-age=31536000, immutable"
-        
-        @dynamic {
-            not path *.js *.css *.woff *.woff2 *.png *.jpg *.jpeg *.gif *.svg *.ico *.html
-        }
-        header @dynamic Cache-Control "public, max-age=3600, must-revalidate"
-        
-        respond "Saeka Secure GCP Gateway Active." 200 {
-            -type text/plain
-        }
-    }
-
-    # Security & stability headers
-    header X-Content-Type-Options nosniff
-    header X-Frame-Options SAMEORIGIN
-    header X-XSS-Protection "1; mode=block"
-    header Referrer-Policy strict-origin-when-cross-origin
-    header Permissions-Policy "geolocation=(), microphone=(), camera=()"
-
-    # Connection keep-alive
-    header Keep-Alive "timeout=120, max=10000"
-
-    # Minimal logging overhead
-    log {
-        output file /var/log/caddy/access.log {
-            roll_size 100mb
-            roll_keep 5
-        }
-        format json
+    handle {
+        respond "MASTER SUPOT Secure GCP Gateway Active." 200
     }
 }
