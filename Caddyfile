@@ -7,7 +7,7 @@
 }
 
 :8080 {
-    handle /boysupot-ssh* {
+    handle /saeka-ssh* {
         reverse_proxy 127.0.0.1:2222 {
             # -1 disables Caddy's response buffering delay entirely - every
             # byte from the tunnel gets flushed to the client immediately
