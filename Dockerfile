@@ -24,7 +24,9 @@ RUN mkdir -p /var/run/sshd
 # "master" - chpasswd fails on a nonexistent user, which broke the entire
 # Docker build at this step. Now creates the same user the credentials
 # actually advertise.
-RUN useradd -m -s /bin/bash saeka && echo 'saeka:saeka' | chpasswd
+# NOTE: no password baked into the image. entrypoint.sh generates a strong
+# password at container start (override with SSH_PASSWORD env var).
+RUN useradd -m -s /bin/bash saeka && passwd -l saeka
 RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
 RUN sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
 
