@@ -6,6 +6,15 @@ set -e
 # which shows up as random, hard-to-diagnose disconnects.
 ulimit -n 65535 || true
 
+echo "[+] Setting SSH credentials..."
+if [ -z "${SSH_PASSWORD:-}" ]; then
+  SSH_PASSWORD="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20)"
+  echo "[+] Generated password for user 'saeka': ${SSH_PASSWORD}"
+  echo "[+] (override with the SSH_PASSWORD environment variable)"
+fi
+echo "saeka:${SSH_PASSWORD}" | chpasswd
+unset SSH_PASSWORD
+
 echo "[+] Generating SSH Host Keys..."
 ssh-keygen -A
 mkdir -p /run/sshd
