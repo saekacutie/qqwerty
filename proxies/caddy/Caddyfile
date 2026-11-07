@@ -6,6 +6,20 @@
 	}
 }
 
+(app_upstream) {
+	reverse_proxy {$UPSTREAM_PRIMARY} {$UPSTREAM_FALLBACK} {
+		lb_policy first
+		lb_try_duration 3s
+		lb_retry_match {
+			method GET HEAD
+		}
+		flush_interval -1
+		transport http {
+			versions 1.1 2 h2c
+		}
+	}
+}
+
 # The load balancer terminates public TLS/HTTP3; this listener serves HTTP/1.1 and HTTP/2 upstream.
 :8080 {
 	log {
@@ -22,44 +36,23 @@
 	# reverse_proxy handles WebSocket upgrades; immediate flushing supports streaming responses.
 	@api path /api/*
 	handle @api {
-		reverse_proxy {$UPSTREAM_PRIMARY} {$UPSTREAM_FALLBACK} {
-			lb_policy first
-			health_uri /healthz
-			health_interval 10s
-			lb_try_duration 3s
-			flush_interval -1
-		}
+		import app_upstream
 	}
 	@grpc header Content-Type application/grpc*
 	handle @grpc {
-		reverse_proxy {$UPSTREAM_PRIMARY} {$UPSTREAM_FALLBACK} {
-			lb_policy first
-			health_uri /healthz
-			health_interval 10s
-			lb_try_duration 3s
-		}
+		import app_upstream
 	}
 	@persistent path /persistent/*
 	handle @persistent {
-		reverse_proxy {$UPSTREAM_PRIMARY} {$UPSTREAM_FALLBACK} {
-			lb_policy first
-			health_uri /healthz
-			health_interval 10s
-			lb_try_duration 3s
-			flush_interval -1
-		}
+		import app_upstream
 	}
 	@assets path /assets/*
 	handle @assets {
 		header Cache-Control "public, max-age=300, stale-while-revalidate=30"
-		reverse_proxy {$UPSTREAM_PRIMARY} {$UPSTREAM_FALLBACK} {
-			lb_policy first
-			health_uri /healthz
-			health_interval 10s
-		}
+		import app_upstream
 	}
 	handle {
 		header Cache-Control "no-store"
-		respond `{"service":"xgcpx","status":"ready"}` 200
+		import app_upstream
 	}
 }

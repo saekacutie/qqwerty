@@ -32,6 +32,7 @@ server {
         proxy_ssl_verify on;
         proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
         proxy_set_header Host ${UPSTREAM_PRIMARY_HOST};
+        proxy_next_upstream error timeout http_502 http_503 http_504;
     }
     location /persistent/ {
         proxy_pass ${UPSTREAM_PRIMARY_SCHEME}://xgcpx_api;
@@ -78,7 +79,17 @@ server {
     location / {
         # gRPC methods use /package.Service/Method paths, not necessarily /api/.
         if ($http_content_type ~* "^application/grpc") { return 418; }
-        add_header Cache-Control "no-store";
-        return 200 '{"service":"xgcpx","status":"ready"}';
+        proxy_pass ${UPSTREAM_PRIMARY_SCHEME}://xgcpx_api;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${UPSTREAM_PRIMARY_HOST};
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_set_header Host ${UPSTREAM_PRIMARY_HOST};
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_next_upstream error timeout http_502 http_503 http_504;
     }
 }

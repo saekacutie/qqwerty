@@ -1,5 +1,6 @@
 locals {
   prefix           = substr(replace(var.service_name, "_", "-"), 0, 24)
+  builtin_backend  = "http://127.0.0.1:8081"
   enable_tcp_proxy = var.enable_tcp_proxy && length(var.tcp_source_ranges) > 0
   common_labels = {
     application = "xgcpx"
@@ -11,6 +12,7 @@ locals {
 
 resource "google_project_service" "required" {
   for_each = toset([
+    "serviceusage.googleapis.com",
     "compute.googleapis.com",
     "run.googleapis.com",
     "artifactregistry.googleapis.com",
@@ -636,9 +638,12 @@ resource "google_compute_url_map" "https" {
   path_matcher {
     name            = "gateway-routes"
     default_service = google_compute_backend_service.cloud_run.id
-    path_rule {
-      paths   = ["/persistent/*"]
-      service = google_compute_backend_service.vm.id
+    dynamic "path_rule" {
+      for_each = var.upstream_primary == local.builtin_backend ? [] : [1]
+      content {
+        paths   = ["/persistent/*"]
+        service = google_compute_backend_service.vm.id
+      }
     }
   }
 }

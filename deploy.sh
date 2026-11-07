@@ -4,19 +4,48 @@ umask 077
 
 readonly APP_NAME="xgcpx"
 readonly DEFAULT_SERVICE="api-gateway-404"
-readonly RED='\033[0;31m' GREEN='\033[0;32m' CYAN='\033[0;36m' YELLOW='\033[0;33m' RESET='\033[0m'
+if [[ -t 1 && "${TERM:-}" != "dumb" && -z "${NO_COLOR:-}" ]]; then
+  readonly RED=$'\033[0;31m' GREEN=$'\033[0;32m' CYAN=$'\033[0;36m'
+  readonly YELLOW=$'\033[0;33m' BLUE=$'\033[0;34m' BOLD=$'\033[1m' RESET=$'\033[0m'
+else
+  readonly RED="" GREEN="" CYAN="" YELLOW="" BLUE="" BOLD="" RESET=""
+fi
 PROTOCOL_CONFIG_FILE=""
 OPENVPN_SECRET_FILE=""
 OPENVPN_PKI_DIR=""
 
-# Print a consistent informational message for each deployment phase.
-info() { printf "${CYAN}==>${RESET} %s\n" "$*"; }
-# Confirm a completed action without hiding command output.
-success() { printf "${GREEN}OK${RESET} %s\n" "$*"; }
-# Surface a non-fatal condition that needs operator attention.
-warn() { printf "${YELLOW}WARN${RESET} %s\n" "$*"; }
-# Stop with a readable error when a required value or tool is missing.
-fail() { printf "${RED}ERROR${RESET} %s\n" "$*" >&2; exit 1; }
+info() { printf '%s==>%s %s\n' "$CYAN" "$RESET" "$*"; }
+success() { printf '%s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
+warn() { printf '%s!%s %s\n' "$YELLOW" "$RESET" "$*"; }
+fail() { printf '%s✗ ERROR%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+section() {
+  printf '\n%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$BLUE" "$RESET"
+  printf '%s%s %s%s\n' "$BOLD" "$BLUE" "$*" "$RESET"
+  printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$BLUE" "$RESET"
+}
+validate_https_upstream() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+try:
+    parsed = urlsplit(sys.argv[1])
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or "@" in parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or "?" in sys.argv[1]
+        or "#" in sys.argv[1]
+    ):
+        raise ValueError
+    if parsed.port is not None and not 1 <= parsed.port <= 65535:
+        raise ValueError
+except ValueError:
+    raise SystemExit(1)
+PY
+}
 # Animate long deployment steps only in interactive terminals, and preserve command output.
 run_with_spinner() {
   local label="$1" output_file status=0 frame=0
@@ -59,6 +88,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
+REGION_HINT="${XGCPX_REGION:-${CLOUDSDK_COMPUTE_REGION:-}}"
+REGION_HINT_SOURCE="environment"
+CLI_REGION=""
+while (($# > 0)); do
+  case "$1" in
+    --region)
+      (($# >= 2)) || fail "--region requires a region name."
+      CLI_REGION="$2"
+      shift 2
+      ;;
+    --region=*)
+      CLI_REGION="${1#--region=}"
+      [[ -n "$CLI_REGION" ]] || fail "--region requires a region name."
+      shift
+      ;;
+    --help|-h)
+      printf 'Usage: %s [--region REGION]\n' "$0"
+      printf 'Region precedence: --region, XGCPX_REGION, CLOUDSDK_COMPUTE_REGION, gcloud compute/region.\n'
+      exit 0
+      ;;
+    *)
+      fail "Unknown argument: $1 (use --help for usage)."
+      ;;
+  esac
+done
+if [[ -n "$CLI_REGION" ]]; then
+  REGION_HINT="$CLI_REGION"
+  REGION_HINT_SOURCE="--region"
+fi
+
 for tool in gcloud docker terraform python3; do
   command -v "$tool" >/dev/null 2>&1 || fail "Required tool not found: $tool"
 done
@@ -71,6 +130,30 @@ ACTIVE_ACCOUNT="$(gcloud config get-value account 2>/dev/null | tr -d '[:space:]
 printf '\n%s\n' "xgcpx | GCP Gateway Deployment"
 printf 'Project: %s | Account: %s\n\n' "$PROJECT_ID" "$ACTIVE_ACCOUNT"
 
+section "PREFLIGHT  |  Enable required Google Cloud APIs"
+REQUIRED_APIS=(
+  serviceusage.googleapis.com
+  cloudresourcemanager.googleapis.com
+  compute.googleapis.com
+  run.googleapis.com
+  artifactregistry.googleapis.com
+  iam.googleapis.com
+  logging.googleapis.com
+  storage.googleapis.com
+  secretmanager.googleapis.com
+)
+run_with_spinner "Enable required APIs in ${PROJECT_ID}" \
+  gcloud services enable "${REQUIRED_APIS[@]}" --project="$PROJECT_ID" --quiet
+
+if [[ -z "$REGION_HINT" ]]; then
+  configured_region="$(gcloud config get-value compute/region 2>/dev/null || true)"
+  if [[ -n "$configured_region" && "$configured_region" != "(unset)" ]]; then
+    REGION_HINT="$configured_region"
+    REGION_HINT_SOURCE="gcloud config"
+  fi
+fi
+
+section "GATEWAY  |  Select the Cloud Run HTTP proxy"
 printf '%s\n' "1) Envoy" "2) Nginx" "3) Caddy" "4) Traefik" "5) Unified Gateway (Caddy)"
 read -r -p "Gateway service [1-5, default 5]: " GATEWAY_CHOICE
 case "${GATEWAY_CHOICE:-5}" in
@@ -84,6 +167,7 @@ esac
 info "Selected ${GATEWAY} gateway; the image will be built from ${DOCKERFILE}."
 
 # The separate static-IP VM serves native protocols; Cloud Run remains HTTP(S)-only.
+section "PROTOCOLS  |  Select services for the separate protocol VM"
 printf '\n%s\n' \
   "Protocol services (separate VM IP):" \
   "1) VLESS over WebSocket and HTTPUpgrade (TLS via Caddy on 443)" \
@@ -91,7 +175,7 @@ printf '\n%s\n' \
   "3) VLESS xHTTP packet-up, stream-up, and stream-one (443 and 8080)" \
   "4) Shadowsocks TCP and UDP (8388)" \
   "5) All protocol services" \
-  "6) OpenVPN over UDP (1194; routed through the protocol VM public IP)"
+  "6) OpenVPN over UDP (1194; VM public IP only, never Cloud Run)"
 PROTOCOL_SELECTION="${XGCPX_PROTOCOLS:-}"
 if [[ -z "$PROTOCOL_SELECTION" ]]; then
   if [[ -t 0 ]]; then
@@ -125,6 +209,9 @@ for protocol in "${PROTOCOL_OPTIONS[@]}"; do
     6) ENABLE_OPENVPN=true; PROTOCOL_UDP_PORTS+=(1194) ;;
   esac
 done
+if [[ ${#PROTOCOL_OPTIONS[@]} -eq 1 && "${PROTOCOL_OPTIONS[0]}" == "6" ]]; then
+  warn "OpenVPN-only still deploys its UDP listener on the protocol VM; Cloud Run cannot relay UDP."
+fi
 if [[ "$ENABLE_OPENVPN" == "true" ]]; then
   command -v openssl >/dev/null 2>&1 || fail "OpenVPN certificate generation requires openssl."
 fi
@@ -132,16 +219,97 @@ read -r -p "Service name [${DEFAULT_SERVICE}]: " SERVICE_NAME
 SERVICE_NAME="${SERVICE_NAME:-$DEFAULT_SERVICE}"
 [[ "$SERVICE_NAME" =~ ^[a-z]([-a-z0-9]{0,47}[a-z0-9])?$ ]] || fail "Invalid Cloud Run service name: $SERVICE_NAME"
 
+section "LOCATION  |  Select a Compute Engine region"
 info "Loading active Compute Engine regions for $PROJECT_ID"
-mapfile -t REGIONS < <(gcloud compute regions list --project="$PROJECT_ID" --filter='status=UP' --format='value(name)' | sort -u)
+REGION_JSON="$(gcloud compute regions list --project="$PROJECT_ID" --filter='status=UP' --format=json)"
+REGION_ROWS="$(python3 -c '
+import json
+import sys
+for region in json.load(sys.stdin):
+    name = region["name"]
+    print(name + "\t" + region.get("description", name))
+' <<<"$REGION_JSON")"
+REGIONS=()
+if [[ -n "$REGION_ROWS" ]]; then mapfile -t REGIONS <<<"$REGION_ROWS"; fi
 ((${#REGIONS[@]} > 0)) || fail "No active Compute Engine regions were returned."
 warn "Region status does not guarantee machine-family quota, capacity, or Always Free eligibility."
-for index in "${!REGIONS[@]}"; do printf '  %2d) %s\n' "$((index + 1))" "${REGIONS[$index]}"; done
-read -r -p "Region [1-${#REGIONS[@]}, default 1]: " REGION_CHOICE
-REGION_CHOICE="${REGION_CHOICE:-1}"
-[[ "$REGION_CHOICE" =~ ^[0-9]+$ ]] && (( REGION_CHOICE >= 1 && REGION_CHOICE <= ${#REGIONS[@]} )) || fail "Select a listed region number."
-REGION="${REGIONS[$((REGION_CHOICE - 1))]}"
+region_flag() {
+  case "$1" in
+    us-*) printf '🇺🇸 United States' ;;
+    northamerica-northeast*) printf '🇨🇦 Canada' ;;
+    northamerica-south*) printf '🇲🇽 Mexico' ;;
+    southamerica-east*) printf '🇧🇷 Brazil' ;;
+    southamerica-west*) printf '🇨🇱 Chile' ;;
+    europe-west1*) printf '🇧🇪 Belgium' ;;
+    europe-west2*) printf '🇬🇧 United Kingdom' ;;
+    europe-west3*) printf '🇩🇪 Germany' ;;
+    europe-west4*) printf '🇳🇱 Netherlands' ;;
+    europe-west6*) printf '🇨🇭 Switzerland' ;;
+    europe-west8*|europe-west12*) printf '🇮🇹 Italy' ;;
+    europe-west9*) printf '🇫🇷 France' ;;
+    europe-west10*) printf '🇩🇪 Germany' ;;
+    europe-north1*) printf '🇫🇮 Finland' ;;
+    europe-north2*) printf '🇸🇪 Sweden' ;;
+    europe-central2*) printf '🇵🇱 Poland' ;;
+    europe-southwest1*) printf '🇪🇸 Spain' ;;
+    asia-east1*) printf '🇹🇼 Taiwan' ;;
+    asia-east2*) printf '🇭🇰 Hong Kong' ;;
+    asia-northeast1*|asia-northeast2*) printf '🇯🇵 Japan' ;;
+    asia-northeast3*) printf '🇰🇷 South Korea' ;;
+    asia-south1*|asia-south2*|asia-south3*) printf '🇮🇳 India' ;;
+    asia-southeast1*) printf '🇸🇬 Singapore' ;;
+    asia-southeast2*) printf '🇮🇩 Indonesia' ;;
+    asia-southeast3*) printf '🇹🇭 Thailand' ;;
+    australia-southeast*) printf '🇦🇺 Australia' ;;
+    me-central1*) printf '🇶🇦 Qatar' ;;
+    me-central2*) printf '🇸🇦 Saudi Arabia' ;;
+    me-west1*) printf '🇮🇱 Israel' ;;
+    africa-south1*) printf '🇿🇦 South Africa' ;;
+    *) printf '🌐 %s' "$2" ;;
+  esac
+}
+region_name() { printf '%s' "${1%%$'\t'*}"; }
+region_description() { printf '%s' "${1#*$'\t'}"; }
+for index in "${!REGIONS[@]}"; do
+  region="$(region_name "${REGIONS[$index]}")"
+  description="$(region_description "${REGIONS[$index]}")"
+  printf '  %2d) %-24s %-20s %s\n' "$((index + 1))" "$region" "$(region_flag "$region" "$description")" "$description"
+done
 
+REGION=""
+if [[ -n "$REGION_HINT" ]]; then
+  for row in "${REGIONS[@]}"; do
+    if [[ "$(region_name "$row")" == "$REGION_HINT" ]]; then REGION="$REGION_HINT"; break; fi
+  done
+  if [[ -n "$REGION" ]]; then
+    info "Auto-selected ${REGION} from ${REGION_HINT_SOURCE} ($(region_flag "$REGION" "$REGION"))."
+  elif [[ "$REGION_HINT_SOURCE" == "--region" || "$REGION_HINT_SOURCE" == "environment" ]]; then
+    fail "Configured region '${REGION_HINT}' is not an active region in project ${PROJECT_ID}."
+  else
+    warn "Configured gcloud region '${REGION_HINT}' is not active; choose an available region below."
+  fi
+fi
+if [[ -z "$REGION" ]]; then
+  REGION_DEFAULT_INDEX=-1
+  for index in "${!REGIONS[@]}"; do
+    if [[ "$(region_name "${REGIONS[$index]}")" == "us-central1" ]]; then REGION_DEFAULT_INDEX="$index"; break; fi
+  done
+  if [[ -t 0 ]]; then
+    if (( REGION_DEFAULT_INDEX < 0 )); then REGION_DEFAULT_INDEX=0; fi
+    info "No region is configured in gcloud; choose a region. The default is a fallback, not a location estimate."
+    read -r -p "Region [1-${#REGIONS[@]}, default $((REGION_DEFAULT_INDEX + 1))]: " REGION_CHOICE
+    REGION_CHOICE="${REGION_CHOICE:-$((REGION_DEFAULT_INDEX + 1))}"
+    [[ "$REGION_CHOICE" =~ ^[0-9]+$ ]] && (( REGION_CHOICE >= 1 && REGION_CHOICE <= ${#REGIONS[@]} )) || fail "Select a listed region number."
+    REGION="$(region_name "${REGIONS[$((REGION_CHOICE - 1))]}")"
+  elif (( REGION_DEFAULT_INDEX >= 0 )); then
+    REGION="us-central1"
+    warn "No region is configured; using us-central1. Set XGCPX_REGION or pass --region to choose another location."
+  else
+    fail "No region is configured and us-central1 is unavailable. Set XGCPX_REGION, CLOUDSDK_COMPUTE_REGION, or pass --region."
+  fi
+fi
+
+section "COMPUTE  |  Select the VM tier"
 printf '\n%s\n' "Compute tier:" "1) e2-micro" "2) e2-small" "3) e2-medium" "4) c2-standard-4" "5) c2d-highcpu-8"
 read -r -p "VM tier [1-5, default 2]: " TIER_CHOICE
 case "${TIER_CHOICE:-2}" in
@@ -160,6 +328,7 @@ else
   warn "${MACHINE_TYPE} is not an Always Free VM tier; check current GCP pricing and quotas before deployment."
 fi
 
+section "APPLICATION  |  Configure the HTTPS hostname and upstream"
 read -r -p "Hostname for managed HTTPS certificate (e.g. api.example.com): " DOMAIN
 [[ "$DOMAIN" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]] || fail "Enter a valid DNS hostname."
 RELAY_DOMAIN="relay.${DOMAIN}"
@@ -174,22 +343,31 @@ else
   UPSTREAM_PRIMARY="$UPSTREAM_PRIMARY_INPUT"
   [[ "$UPSTREAM_PRIMARY" == https://* ]] || fail "Use an HTTPS URL, or leave this blank for the built-in Cloud Run API."
   case "$UPSTREAM_PRIMARY" in *[[:space:]]*|*\"*|*\\*) fail "Upstream URL contains unsupported whitespace or quoting." ;; esac
-  upstream_host="${UPSTREAM_PRIMARY#https://}"
-  upstream_host="${upstream_host%%/*}"
-  upstream_host="${upstream_host%%:*}"
+  validate_https_upstream "$UPSTREAM_PRIMARY" || fail "Enter a valid HTTPS upstream URL without credentials, query, or fragment."
+  upstream_host="$(python3 -c 'import sys; from urllib.parse import urlsplit; print(urlsplit(sys.argv[1]).hostname)' "$UPSTREAM_PRIMARY")"
   [[ "${upstream_host,,}" != "${DOMAIN,,}" && "${upstream_host,,}" != "${RELAY_DOMAIN,,}" ]] \
     || fail "The upstream cannot use the gateway or relay hostname; that would proxy back into this deployment."
   read -r -p "Fallback HTTPS application upstream URL [same as primary]: " UPSTREAM_FALLBACK
   UPSTREAM_FALLBACK="${UPSTREAM_FALLBACK:-$UPSTREAM_PRIMARY}"
   [[ "$UPSTREAM_FALLBACK" == https://* ]] || fail "Use an HTTPS fallback URL."
   case "$UPSTREAM_FALLBACK" in *[[:space:]]*|*\"*|*\\*) fail "Fallback URL contains unsupported whitespace or quoting." ;; esac
-  fallback_host="${UPSTREAM_FALLBACK#https://}"
-  fallback_host="${fallback_host%%/*}"
-  fallback_host="${fallback_host%%:*}"
+  validate_https_upstream "$UPSTREAM_FALLBACK" || fail "Enter a valid HTTPS fallback URL without credentials, query, or fragment."
+  fallback_host="$(python3 -c 'import sys; from urllib.parse import urlsplit; print(urlsplit(sys.argv[1]).hostname)' "$UPSTREAM_FALLBACK")"
   [[ "${fallback_host,,}" != "${DOMAIN,,}" && "${fallback_host,,}" != "${RELAY_DOMAIN,,}" ]] \
     || fail "The fallback cannot use the gateway or relay hostname; that would create a proxy loop."
+  if [[ "$GATEWAY" == "nginx" || "$GATEWAY" == "envoy" ]]; then
+    primary_authority="${UPSTREAM_PRIMARY#https://}"
+    fallback_authority="${UPSTREAM_FALLBACK#https://}"
+    [[ "$primary_authority" != *[/?#]* && "$fallback_authority" != *[/?#]* ]] \
+      || fail "${GATEWAY} currently supports root-path HTTPS upstream URLs only; remove any path, query, or fragment."
+    [[ "$upstream_host" != *:* && "$fallback_host" != *:* ]] \
+      || fail "${GATEWAY} currently supports DNS names and IPv4 upstreams, not IPv6 literals."
+    [[ "${upstream_host,,}" == "${fallback_host,,}" ]] \
+      || fail "${GATEWAY} failover requires the primary and fallback to share one hostname for correct Host and TLS SNI routing."
+  fi
 fi
 
+section "SECURITY  |  Configure optional Cloud Armor source rules"
 read -r -p "Cloud Armor deny CIDRs (comma-separated, blank for none): " BLOCKED_CIDR_INPUT
 read -r -p "Cloud Armor allow CIDRs (comma-separated, blank for unrestricted): " ALLOWED_CIDR_INPUT
 BLOCKED_CIDRS=()
@@ -232,11 +410,7 @@ json_array() {
   printf '%s]\n' "${result%,}"
 }
 
-run_with_spinner "Enabling required Google Cloud APIs" gcloud services enable run.googleapis.com compute.googleapis.com artifactregistry.googleapis.com \
-  iam.googleapis.com logging.googleapis.com cloudresourcemanager.googleapis.com storage.googleapis.com \
-  secretmanager.googleapis.com \
-  --project="$PROJECT_ID" --quiet
-
+section "DEPLOY  |  Prepare state, images, and protocol credentials"
 STATE_BUCKET="${PROJECT_ID}-xgcpx-tfstate"
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 if gcloud storage buckets describe "gs://${STATE_BUCKET}" --format='value(projectNumber)' >/dev/null 2>&1; then
@@ -505,7 +679,8 @@ run_with_spinner "Deploying Cloud Run, gateway VM, protocol VM, HTTPS load balan
   terraform -chdir=terraform apply -input=false -auto-approve
 
 LB_IP="$(terraform -chdir=terraform output -raw load_balancer_ip)"
-printf '\n%s\n' "Deployment complete." "Service: $SERVICE_NAME" "Region: $REGION" "Gateway: $GATEWAY" \
+section "COMPLETE  |  Deployment outputs"
+printf '%s\n' "Service: $SERVICE_NAME" "Region: $REGION ($(region_flag "$REGION" "$REGION"))" "Gateway: $GATEWAY" \
   "HTTPS URL: https://${DOMAIN}" "Global load balancer IP: ${LB_IP}" \
   "DNS: create an A record for ${DOMAIN} pointing to ${LB_IP}; certificate provisioning starts after DNS resolves."
 printf 'Selected gateway image source: %s (only this gateway Dockerfile was built).\n' "$DOCKERFILE"

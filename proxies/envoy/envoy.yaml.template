@@ -10,6 +10,7 @@ static_resources:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                 stat_prefix: xgcpx_http
                 codec_type: AUTO
+                stream_idle_timeout: 3600s
                 internal_address_config: {}
                 access_log:
                   - name: envoy.access_loggers.stdout
@@ -31,11 +32,11 @@ static_resources:
                         - match: { prefix: /assets/ }
                           response_headers_to_add:
                             - header: { key: Cache-Control, value: "public, max-age=300" }
-                          route: { cluster: api_upstream, timeout: 30s }
+                          route: { cluster: api_upstream, timeout: 3600s, host_rewrite_literal: "${PRIMARY_HOST}" }
                         - match: { prefix: /api/ }
-                          route: { cluster: api_upstream, timeout: 30s }
+                          route: { cluster: api_upstream, timeout: 3600s, host_rewrite_literal: "${PRIMARY_HOST}" }
                         - match: { prefix: / }
-                          route: { cluster: api_upstream, timeout: 30s }
+                          route: { cluster: api_upstream, timeout: 3600s, host_rewrite_literal: "${PRIMARY_HOST}" }
                 http_filters:
                   - name: envoy.filters.http.router
                     typed_config:
@@ -77,12 +78,6 @@ static_resources:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
           explicit_http_config:
             http2_protocol_options: {}
-      health_checks:
-        - timeout: 3s
-          interval: 10s
-          unhealthy_threshold: 2
-          healthy_threshold: 2
-          http_health_check: { path: /healthz }
       load_assignment:
         cluster_name: api_upstream
         endpoints:
