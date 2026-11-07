@@ -14,6 +14,9 @@ PROTOCOL_CONFIG_FILE=""
 OPENVPN_SECRET_FILE=""
 OPENVPN_PKI_DIR=""
 TERRAFORM_PLAN_FILE=""
+RUN_REGION_JSON_FILE=""
+COMPUTE_REGION_JSON_FILE=""
+MACHINE_TYPE_JSON_FILE=""
 
 info() { printf '%s==>%s %s\n' "$CYAN" "$RESET" "$*"; }
 success() { printf '%s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
@@ -92,6 +95,9 @@ cleanup() {
   if [[ -n "$OPENVPN_SECRET_FILE" ]]; then rm -f -- "$OPENVPN_SECRET_FILE"; fi
   if [[ -n "$OPENVPN_PKI_DIR" ]]; then rm -rf -- "$OPENVPN_PKI_DIR"; fi
   if [[ -n "$TERRAFORM_PLAN_FILE" ]]; then rm -f -- "$TERRAFORM_PLAN_FILE"; fi
+  if [[ -n "$RUN_REGION_JSON_FILE" ]]; then rm -f -- "$RUN_REGION_JSON_FILE"; fi
+  if [[ -n "$COMPUTE_REGION_JSON_FILE" ]]; then rm -f -- "$COMPUTE_REGION_JSON_FILE"; fi
+  if [[ -n "$MACHINE_TYPE_JSON_FILE" ]]; then rm -f -- "$MACHINE_TYPE_JSON_FILE"; fi
 }
 trap cleanup EXIT
 
@@ -288,20 +294,28 @@ fi
 
 section "LOCATION  |  Select a Compute Engine region"
 info "Checking Cloud Run support, active Compute Engine regions, and ${MACHINE_TYPE} availability for ${PROJECT_ID}"
-if ! RUN_REGION_JSON="$(gcloud run regions list --project="$PROJECT_ID" --format=json)"; then
+RUN_REGION_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/xgcpx-run-regions.XXXXXX")"
+COMPUTE_REGION_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/xgcpx-compute-regions.XXXXXX")"
+MACHINE_TYPE_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/xgcpx-machine-types.XXXXXX")"
+if ! gcloud run regions list --project="$PROJECT_ID" --format=json >"$RUN_REGION_JSON_FILE"; then
   fail "Cannot query Cloud Run region support. Check run.locations.list permission, the Cloud Run API, and gcloud SDK version."
 fi
-if ! COMPUTE_REGION_JSON="$(gcloud compute regions list --project="$PROJECT_ID" --filter='status=UP' --format=json)"; then
+if ! gcloud compute regions list --project="$PROJECT_ID" --filter='status=UP' --format=json >"$COMPUTE_REGION_JSON_FILE"; then
   fail "Cannot query active Compute Engine regions. Check compute.regions.list permission and the Compute Engine API."
 fi
-if ! MACHINE_TYPE_JSON="$(gcloud compute machine-types list --project="$PROJECT_ID" --filter="name=${MACHINE_TYPE}" --format=json)"; then
+if ! gcloud compute machine-types list --project="$PROJECT_ID" --filter="name=${MACHINE_TYPE}" --format=json >"$MACHINE_TYPE_JSON_FILE"; then
   fail "Cannot query ${MACHINE_TYPE} availability. Check compute.machineTypes.list permission and the Compute Engine API."
 fi
-REGION_ROWS="$(python3 -c '
+if ! REGION_ROWS="$(python3 - "$RUN_REGION_JSON_FILE" "$COMPUTE_REGION_JSON_FILE" "$MACHINE_TYPE_JSON_FILE" <<'PY'
 import json
 import re
 import sys
-run_regions, compute_regions, machine_types = map(json.loads, sys.argv[1:])
+
+def load_json(path):
+    with open(path, encoding="utf-8") as source:
+        return json.load(source)
+
+run_regions, compute_regions, machine_types = map(load_json, sys.argv[1:])
 def location_name(resource):
     if isinstance(resource, str):
         return resource.rsplit("/locations/", 1)[-1]
@@ -332,8 +346,10 @@ for name in sorted(run_names & compute_by_name.keys() & machine_regions):
     region = compute_by_name[name]
     description = region.get("description") or name
     print(name + "\t" + description)
-' "$RUN_REGION_JSON" "$COMPUTE_REGION_JSON" "$MACHINE_TYPE_JSON")" \
-  || fail "Unable to parse the live Cloud Run, Compute Engine, and machine-type region responses."
+PY
+)"; then
+  fail "Unable to parse live Cloud Run, Compute Engine, or machine-type region responses."
+fi
 REGIONS=()
 if [[ -n "$REGION_ROWS" ]]; then mapfile -t REGIONS <<<"$REGION_ROWS"; fi
 ((${#REGIONS[@]} > 0)) || fail "No region currently satisfies all three checks: Cloud Run support, Compute Engine region status UP, and ${MACHINE_TYPE} listed for this project."
