@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -Eeuo pipefail
 
 # Raise open-file ceiling before anything starts - SSH channels + udpgw
 # connections + WS sockets can exhaust the default 1024 limit under load,
@@ -8,7 +8,7 @@ ulimit -n 65535 || true
 
 echo "[+] Setting SSH credentials..."
 if [ -z "${SSH_PASSWORD:-}" ]; then
-  SSH_PASSWORD="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20)"
+  SSH_PASSWORD="$(python3 -c 'import secrets, string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(20)))')"
   echo "[+] Generated password for user 'saeka': ${SSH_PASSWORD}"
   echo "[+] (override with the SSH_PASSWORD environment variable)"
 fi
