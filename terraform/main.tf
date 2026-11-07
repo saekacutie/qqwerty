@@ -1,7 +1,19 @@
 locals {
-  prefix           = substr(replace(var.service_name, "_", "-"), 0, 24)
-  builtin_backend  = "http://127.0.0.1:8081"
-  enable_tcp_proxy = var.enable_tcp_proxy && length(var.tcp_source_ranges) > 0
+  prefix                   = substr(replace(var.service_name, "_", "-"), 0, 24)
+  builtin_backend          = "http://127.0.0.1:8081"
+  protocol_upstream_scheme    = var.enable_cloudrun_protocols ? "http" : (var.protocol_domain != "" ? "https" : "http")
+  protocol_upstream_host      = var.enable_cloudrun_protocols ? "127.0.0.1" : (var.protocol_domain != "" ? var.protocol_domain : "127.0.0.1")
+  protocol_upstream_port      = var.enable_cloudrun_protocols ? 8082 : (var.protocol_domain != "" ? 443 : 8081)
+  protocol_upstream           = "${local.protocol_upstream_scheme}://${local.protocol_upstream_host}:${local.protocol_upstream_port}"
+  protocol_grpc_scheme        = var.enable_cloudrun_protocols ? "grpc" : (var.protocol_domain != "" ? "grpcs" : "grpc")
+  vm_protocol_upstream        = var.protocol_runtime == "cloud-run" ? local.builtin_backend : local.protocol_upstream
+  vm_protocol_upstream_host   = var.protocol_runtime == "cloud-run" ? "127.0.0.1" : local.protocol_upstream_host
+  vm_protocol_upstream_port   = var.protocol_runtime == "cloud-run" ? 8081 : local.protocol_upstream_port
+  vm_protocol_upstream_scheme = var.protocol_runtime == "cloud-run" ? "http" : local.protocol_upstream_scheme
+  vm_protocol_grpc_scheme     = var.protocol_runtime == "cloud-run" ? "grpc" : local.protocol_grpc_scheme
+  vm_boot_disk_type           = var.machine_type == "e2-micro" ? "pd-standard" : "pd-balanced"
+  vm_boot_disk_size           = var.machine_type == "e2-micro" ? 15 : 20
+  enable_tcp_proxy            = var.enable_tcp_proxy && length(var.tcp_source_ranges) > 0
   common_labels = {
     application = "xgcpx"
     managed_by  = "terraform"
@@ -41,10 +53,16 @@ resource "google_cloud_run_v2_service" "gateway" {
       condition     = var.backend_image != ""
       error_message = "The Cloud Run gateway requires the built-in backend sidecar image."
     }
+
+    precondition {
+      condition     = !var.enable_cloudrun_protocols || (var.protocol_image != "" && var.protocol_secret_name != "" && var.protocol_secret_version != "")
+      error_message = "Cloud Run protocol routing requires the protocol image and Secret Manager config/version."
+    }
   }
 
   template {
-    timeout = "3600s"
+    timeout        = "3600s"
+    service_account = var.enable_cloudrun_protocols ? google_service_account.cloudrun_protocols[0].email : null
     scaling {
       min_instance_count = 0
       max_instance_count = 100
@@ -52,7 +70,7 @@ resource "google_cloud_run_v2_service" "gateway" {
     containers {
       name       = "gateway"
       image      = var.image
-      depends_on = ["backend"]
+      depends_on = var.enable_cloudrun_protocols ? ["backend", "protocol"] : ["backend"]
       ports {
         name           = "h2c"
         container_port = 8080
@@ -70,6 +88,26 @@ resource "google_cloud_run_v2_service" "gateway" {
       env {
         name  = "UPSTREAM_FALLBACK"
         value = var.upstream_fallback
+      }
+      env {
+        name  = "PROTOCOL_UPSTREAM"
+        value = local.protocol_upstream
+      }
+      env {
+        name  = "PROTOCOL_UPSTREAM_HOST"
+        value = local.protocol_upstream_host
+      }
+      env {
+        name  = "PROTOCOL_UPSTREAM_PORT"
+        value = tostring(local.protocol_upstream_port)
+      }
+      env {
+        name  = "PROTOCOL_UPSTREAM_SCHEME"
+        value = local.protocol_upstream_scheme
+      }
+      env {
+        name  = "PROTOCOL_GRPC_SCHEME"
+        value = local.protocol_grpc_scheme
       }
     }
     containers {
@@ -90,9 +128,63 @@ resource "google_cloud_run_v2_service" "gateway" {
         }
       }
     }
+    dynamic "containers" {
+      for_each = var.enable_cloudrun_protocols ? [1] : []
+      content {
+        name  = "protocol"
+        image = var.protocol_image
+        env {
+          name  = "PROJECT_ID"
+          value = var.project_id
+        }
+        env {
+          name  = "PROTOCOL_SECRET_NAME"
+          value = var.protocol_secret_name
+        }
+        env {
+          name  = "RELAY_DOMAIN"
+          value = var.protocol_domain != "" ? var.protocol_domain : var.domain
+        }
+        env {
+          name  = "PROTOCOL_HTTP_ONLY"
+          value = "true"
+        }
+        startup_probe {
+          tcp_socket {
+            port = 8082
+          }
+          period_seconds    = 1
+          timeout_seconds   = 1
+          failure_threshold = 120
+        }
+        resources {
+          limits = {
+            cpu    = "1"
+            memory = "512Mi"
+          }
+        }
+      }
+    }
   }
 
-  depends_on = [google_project_service.required]
+  depends_on = [
+    google_project_service.required,
+    google_secret_manager_secret_iam_member.cloudrun_protocol_config_reader,
+  ]
+}
+
+resource "google_service_account" "cloudrun_protocols" {
+  count        = var.enable_cloudrun_protocols ? 1 : 0
+  account_id   = substr("${local.prefix}-run-proto", 0, 30)
+  display_name = "xgcpx Cloud Run protocol sidecar"
+}
+
+resource "google_secret_manager_secret_iam_member" "cloudrun_protocol_config_reader" {
+  count     = var.enable_cloudrun_protocols ? 1 : 0
+  project   = var.project_id
+  secret_id = var.protocol_secret_name
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.cloudrun_protocols[0].email}"
 }
 
 resource "google_cloud_run_v2_service_iam_member" "load_balancer_invoker" {
@@ -143,8 +235,8 @@ resource "google_compute_instance_template" "gateway" {
     source_image = "cos-cloud/cos-stable"
     auto_delete  = true
     boot         = true
-    disk_size_gb = 20
-    disk_type    = "pd-balanced"
+    disk_size_gb = local.vm_boot_disk_size
+    disk_type    = local.vm_boot_disk_type
   }
 
   network_interface {
@@ -159,11 +251,16 @@ resource "google_compute_instance_template" "gateway" {
 
   metadata = {
     gce-container-declaration = templatefile("${path.module}/container-declaration.yaml.tftpl", {
-      image             = var.image
-      upstream_primary  = var.upstream_primary
-      upstream_fallback = var.upstream_fallback
-      tcp_upstream_host = var.tcp_upstream_host
-      tls_upstream_host = var.tls_upstream_host
+      image                     = var.image
+      upstream_primary          = var.upstream_primary
+      upstream_fallback         = var.upstream_fallback
+      protocol_upstream         = local.vm_protocol_upstream
+      protocol_upstream_host    = local.vm_protocol_upstream_host
+      protocol_upstream_port    = local.vm_protocol_upstream_port
+      protocol_upstream_scheme  = local.vm_protocol_upstream_scheme
+      protocol_grpc_scheme      = local.vm_protocol_grpc_scheme
+      tcp_upstream_host         = var.tcp_upstream_host
+      tls_upstream_host         = var.tls_upstream_host
     })
   }
 
@@ -193,7 +290,7 @@ resource "google_project_iam_member" "protocol_vm_artifact_reader" {
 }
 
 resource "google_secret_manager_secret_iam_member" "protocol_config_reader" {
-  count     = var.enable_protocol_gateway ? 1 : 0
+  count     = var.enable_protocol_gateway && var.protocol_runtime == "vm" ? 1 : 0
   project   = var.project_id
   secret_id = var.protocol_secret_name
   role      = "roles/secretmanager.secretAccessor"
@@ -218,15 +315,15 @@ resource "google_compute_address" "protocol_vm" {
 
 resource "terraform_data" "protocol_deployment" {
   input = {
-    image                  = var.protocol_image_revision
-    secret_version         = var.protocol_secret_version
+    image                  = var.protocol_runtime == "vm" ? var.protocol_image_revision : ""
+    secret_version         = var.protocol_runtime == "vm" ? var.protocol_secret_version : ""
     openvpn_image          = var.openvpn_image
     openvpn_secret_version = var.openvpn_secret_version
   }
 
   triggers_replace = {
-    image                  = var.protocol_image_revision
-    secret_version         = var.protocol_secret_version
+    image                  = var.protocol_runtime == "vm" ? var.protocol_image_revision : ""
+    secret_version         = var.protocol_runtime == "vm" ? var.protocol_secret_version : ""
     openvpn_image          = var.openvpn_image
     openvpn_secret_version = var.openvpn_secret_version
   }
@@ -243,8 +340,8 @@ resource "google_compute_instance" "protocol_vm" {
   boot_disk {
     initialize_params {
       image = "cos-cloud/cos-stable"
-      size  = 20
-      type  = "pd-balanced"
+      size  = local.vm_boot_disk_size
+      type  = local.vm_boot_disk_type
     }
   }
 
@@ -275,12 +372,18 @@ resource "google_compute_instance" "protocol_vm" {
     replace_triggered_by = [terraform_data.protocol_deployment]
 
     precondition {
-      condition     = var.protocol_image != "" && var.protocol_domain != "" && var.protocol_secret_name != "" && var.protocol_startup_script != "" && var.protocol_secret_version != "" && var.protocol_image_revision != ""
-      error_message = "The protocol VM requires an image, relay hostname, Secret Manager version, and rendered startup script from deploy.sh."
+      condition = var.protocol_runtime == "cloud-run" ? (
+        var.enable_openvpn && var.openvpn_image != "" && var.openvpn_secret_name != "" &&
+        var.openvpn_secret_version != "" && var.protocol_startup_script != ""
+      ) : (
+        var.protocol_image != "" && var.protocol_domain != "" && var.protocol_secret_name != "" &&
+        var.protocol_startup_script != "" && var.protocol_secret_version != "" && var.protocol_image_revision != ""
+      )
+      error_message = "The protocol VM requires a valid hybrid Xray configuration or an OpenVPN-only VM startup configuration."
     }
 
     precondition {
-      condition     = contains(var.protocol_tcp_ports, "80") && contains(var.protocol_tcp_ports, "443")
+      condition     = var.protocol_runtime == "cloud-run" || (contains(var.protocol_tcp_ports, "80") && contains(var.protocol_tcp_ports, "443"))
       error_message = "The protocol VM must expose TCP 80 and 443 for HTTP redirects and TLS."
     }
 
@@ -361,7 +464,8 @@ resource "google_compute_region_autoscaler" "gateway" {
 
   autoscaling_policy {
     min_replicas    = 1
-    max_replicas    = 3
+    # Keep e2-micro's gateway disk footprint within the shared 30 GB-month allowance.
+    max_replicas    = var.machine_type == "e2-micro" ? 1 : 3
     cooldown_period = 120
     cpu_utilization {
       target = 0.65

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 umask 077
+export DEBIAN_FRONTEND=noninteractive
 
 readonly APP_NAME="xgcpx"
 readonly DEFAULT_SERVICE="api-gateway-404"
@@ -11,6 +12,7 @@ else
   readonly RED="" GREEN="" CYAN="" YELLOW="" BLUE="" BOLD="" RESET=""
 fi
 PROTOCOL_CONFIG_FILE=""
+CLIENT_PROFILE_REPORT=""
 OPENVPN_SECRET_FILE=""
 OPENVPN_PKI_DIR=""
 TERRAFORM_PLAN_FILE=""
@@ -220,56 +222,113 @@ case "${GATEWAY_CHOICE:-5}" in
 esac
 info "Selected ${GATEWAY} gateway; the image will be built from ${DOCKERFILE}."
 
-# Native protocol services run on a separate static-IP VM; Cloud Run remains HTTP(S)-only.
-section "PROTOCOLS  |  Select services for the separate protocol VM"
+section "RUNTIME  |  Choose where HTTP protocol services run"
+PROTOCOL_RUNTIME="${XGCPX_PROTOCOL_RUNTIME:-}"
+if [[ -z "$PROTOCOL_RUNTIME" && -t 0 ]]; then
+  printf '%s\n' \
+    "1) Hybrid (Xray services on the protocol VM; OpenVPN optional)" \
+    "2) Cloud Run (HTTP transports in a sidecar; OpenVPN remains VM-only)"
+  read -r -p "Protocol runtime [1/2, default 1]: " RUNTIME_CHOICE
+  case "${RUNTIME_CHOICE:-1}" in
+    1) PROTOCOL_RUNTIME="vm" ;;
+    2) PROTOCOL_RUNTIME="cloud-run" ;;
+    *) fail "Choose runtime 1 (hybrid) or 2 (Cloud Run)." ;;
+  esac
+elif [[ -z "$PROTOCOL_RUNTIME" ]]; then
+  PROTOCOL_RUNTIME="vm"
+fi
+PROTOCOL_RUNTIME="${PROTOCOL_RUNTIME,,}"
+case "$PROTOCOL_RUNTIME" in
+  hybrid|vm) PROTOCOL_RUNTIME="vm" ;;
+  cloud-run|cloudrun) PROTOCOL_RUNTIME="cloud-run" ;;
+  *) fail "Set XGCPX_PROTOCOL_RUNTIME to vm or cloud-run." ;;
+esac
+info "Selected protocol runtime: ${PROTOCOL_RUNTIME}."
+
+# Raw TCP/UDP services stay on a static-IP VM; HTTP-compatible Xray transports can run in Cloud Run.
+# 1-3 select VLESS WS/HTTPUpgrade, gRPC, or xHTTP loopback inbounds; 4 selects Shadowsocks TCP/UDP;
+# 5 selects OpenVPN UDP; 6 selects Trojan WS/HTTPUpgrade; 7 selects VMess WS; 8 selects SSH WS; 9 is all.
+# Xray mux is client-side outbound behavior and does not create a separate server inbound or port.
+section "PROTOCOLS  |  Select supported transport services"
+# These numbered choices map directly to the supported protocol inbounds below.
+SHADOWSOCKS_MENU_LABEL="4) Shadowsocks TCP/UDP (8388; mux is client-configured)"
+if [[ "$PROTOCOL_RUNTIME" == "cloud-run" ]]; then
+  SHADOWSOCKS_MENU_LABEL="4) Shadowsocks TCP/UDP (VM-only; unavailable in Cloud Run mode)"
+fi
 printf '\n%s\n' \
-  "Protocol services (separate VM IP):" \
-  "Any selection below uses a protocol VM; OpenVPN is optional and is not required for the other protocols." \
-  "1) VLESS over WebSocket and HTTPUpgrade (TLS via Caddy on 443)" \
-  "2) VLESS gRPC over TLS (443 and 50051)" \
+  "Protocol services:" \
+  "HTTP-compatible transports use the selected runtime; OpenVPN always uses the VM relay." \
+  "1) VLESS WebSocket (ws) and HTTPUpgrade (TLS via Caddy on 443)" \
+  "2) VLESS gRPC over HTTP/2 (443 and 50051)" \
   "3) VLESS xHTTP packet-up, stream-up, and stream-one (443 and 8080)" \
-  "4) Shadowsocks TCP and UDP (8388)" \
-  "5) All protocol services" \
-  "6) OpenVPN over UDP (1194; VM public IP only, never Cloud Run)" \
-  "7) Trojan over TLS/WebSocket (443)" \
-  "8) VMess over TLS/WebSocket (443)" \
-  "9) SSH over TLS/WebSocket (443; generated password)"
+  "$SHADOWSOCKS_MENU_LABEL" \
+  "5) OpenVPN over UDP (1194; VM public IP only, never Cloud Run)" \
+  "6) Trojan over TLS/WebSocket or HTTPUpgrade (443)" \
+  "7) VMess over TLS/WebSocket (443)" \
+  "8) SSH over WebSocket via Cloud Run edge (generated password)" \
+  "9) All supported protocol services"
 PROTOCOL_SELECTION="${XGCPX_PROTOCOLS:-}"
 if [[ -z "$PROTOCOL_SELECTION" ]]; then
   if [[ -t 0 ]]; then
-    read -r -p "Protocols [1-4, 6-9, comma-separated, or all; default all]: " PROTOCOL_SELECTION
+    read -r -p "Protocols [1-8, 9/all, or comma-separated; default all]: " PROTOCOL_SELECTION
   fi
   PROTOCOL_SELECTION="${PROTOCOL_SELECTION:-all}"
 fi
 PROTOCOL_SELECTION="${PROTOCOL_SELECTION,,}"
 PROTOCOL_SELECTION="${PROTOCOL_SELECTION//[[:space:]]/}"
 PROTOCOL_OPTIONS=()
-if [[ "$PROTOCOL_SELECTION" == "all" || "$PROTOCOL_SELECTION" == "5" ]]; then
-  PROTOCOL_OPTIONS=(1 2 3 4 6 7 8 9)
+if [[ "$PROTOCOL_SELECTION" == "all" || "$PROTOCOL_SELECTION" == "9" ]]; then
+  if [[ "$PROTOCOL_RUNTIME" == "cloud-run" ]]; then
+    PROTOCOL_OPTIONS=(1 2 3 5 6 7 8)
+  else
+    PROTOCOL_OPTIONS=(1 2 3 4 5 6 7 8)
+  fi
 else
   IFS=',' read -r -a PROTOCOL_OPTIONS <<< "$PROTOCOL_SELECTION"
 fi
-PROTOCOL_TCP_PORTS=(80 443)
+PROTOCOL_TCP_PORTS=()
 PROTOCOL_UDP_PORTS=()
+if [[ "$PROTOCOL_RUNTIME" == "vm" ]]; then PROTOCOL_TCP_PORTS=(80 443); fi
 PROTOCOL_TAGS=()
 ENABLE_OPENVPN=false
+ENABLE_PROTOCOL_VM=false
+ENABLE_CLOUDRUN_PROTOCOLS=false
 SEEN_PROTOCOLS=" "
+# Tags select transport-specific Xray inbounds; Shadowsocks mux is a compatible-client behavior, not a separate listener.
 for protocol in "${PROTOCOL_OPTIONS[@]}"; do
-  [[ "$protocol" =~ ^(1|2|3|4|6|7|8|9)$ ]] || fail "Choose 1-4 or 6-9; 5/all must be selected alone."
+  [[ "$protocol" =~ ^[1-8]$ ]] || fail "Choose 1-8, or select 9/all by itself."
   [[ "$SEEN_PROTOCOLS" != *" $protocol "* ]] || fail "Protocol selections must not contain duplicates."
   SEEN_PROTOCOLS+="${protocol} "
   case "$protocol" in
     1) PROTOCOL_TAGS+=(vless-ws vless-httpupgrade) ;;
-    2) PROTOCOL_TAGS+=(vless-grpc); PROTOCOL_TCP_PORTS+=(50051) ;;
-    3) PROTOCOL_TAGS+=(xhttp-packet xhttp-chunked xhttp-request-response); PROTOCOL_TCP_PORTS+=(8080) ;;
-    4) PROTOCOL_TAGS+=(shadowsocks); PROTOCOL_TCP_PORTS+=(8388); PROTOCOL_UDP_PORTS+=(8388) ;;
-    6) ENABLE_OPENVPN=true; PROTOCOL_UDP_PORTS+=(1194) ;;
-    7) PROTOCOL_TAGS+=(trojan-ws) ;;
-    8) PROTOCOL_TAGS+=(vmess-ws) ;;
-    9) PROTOCOL_TAGS+=(ssh-ws) ;;
+    2)
+      PROTOCOL_TAGS+=(vless-grpc)
+      if [[ "$PROTOCOL_RUNTIME" == "vm" ]]; then PROTOCOL_TCP_PORTS+=(50051); fi
+      ;;
+    3)
+      PROTOCOL_TAGS+=(xhttp-packet xhttp-chunked xhttp-request-response)
+      if [[ "$PROTOCOL_RUNTIME" == "vm" ]]; then PROTOCOL_TCP_PORTS+=(8080); fi
+      ;;
+    4)
+      [[ "$PROTOCOL_RUNTIME" == "vm" ]] || fail "Shadowsocks needs raw TCP/UDP; choose the VM runtime or omit option 4."
+      PROTOCOL_TAGS+=(shadowsocks)
+      PROTOCOL_TCP_PORTS+=(8388)
+      PROTOCOL_UDP_PORTS+=(8388)
+      ;;
+    5) ENABLE_OPENVPN=true; PROTOCOL_UDP_PORTS+=(1194) ;;
+    6) PROTOCOL_TAGS+=(trojan-ws trojan-httpupgrade) ;;
+    7) PROTOCOL_TAGS+=(vmess-ws) ;;
+    8) PROTOCOL_TAGS+=(ssh-ws) ;;
   esac
 done
-if [[ ${#PROTOCOL_OPTIONS[@]} -eq 1 && "${PROTOCOL_OPTIONS[0]}" == "6" ]]; then
+if [[ "$PROTOCOL_RUNTIME" == "vm" ]]; then
+  ENABLE_PROTOCOL_VM=true
+  ENABLE_CLOUDRUN_PROTOCOLS=false
+else
+  ENABLE_PROTOCOL_VM="$ENABLE_OPENVPN"
+  if ((${#PROTOCOL_TAGS[@]} > 0)); then ENABLE_CLOUDRUN_PROTOCOLS=true; fi
+fi
+if [[ ${#PROTOCOL_OPTIONS[@]} -eq 1 && "${PROTOCOL_OPTIONS[0]}" == "5" ]]; then
   warn "OpenVPN-only still deploys its UDP listener on the protocol VM; Cloud Run cannot relay UDP."
 fi
 if [[ "$ENABLE_OPENVPN" == "true" ]]; then
@@ -280,9 +339,12 @@ SERVICE_NAME="${SERVICE_NAME:-$DEFAULT_SERVICE}"
 [[ "$SERVICE_NAME" =~ ^[a-z]([-a-z0-9]{0,47}[a-z0-9])?$ ]] || fail "Invalid Cloud Run service name: $SERVICE_NAME"
 
 section "COMPUTE  |  Select the VM tier used by this deployment"
-info "This stack always creates a gateway VM; selected protocol services use a second VM. This tier applies to both, whether or not OpenVPN is selected."
-printf '\n%s\n' "Compute tier:" "1) e2-micro" "2) e2-small" "3) e2-medium" "4) c2-standard-4" "5) c2d-highcpu-8"
-read -r -p "Machine type for the gateway and protocol VMs [1-5, default 2]: " TIER_CHOICE
+info "The gateway VM is always created. Hybrid protocol runtime uses a second VM; Cloud Run runtime adds a protocol VM only when OpenVPN is selected."
+printf '\n%s\n' "Compute tier:" \
+  "1) e2-micro (2 shared vCPUs, 1 GiB; possible Always Free VM in us-central1/us-west1/us-east1)" \
+  "2) e2-small" "3) e2-medium" "4) c2-standard-4" "5) c2d-highcpu-8"
+info "Each e2-micro VM uses a 15 GB pd-standard disk; gateway plus OpenVPN VM totals 30 GB. Gateway replicas are capped at one, and other resources can still incur charges."
+read -r -p "Machine type for the gateway and any protocol VM [1-5, default 2]: " TIER_CHOICE
 case "${TIER_CHOICE:-2}" in
   1) MACHINE_TYPE="e2-micro" ;;
   2) MACHINE_TYPE="e2-small" ;;
@@ -455,8 +517,10 @@ case "$MACHINE_TYPE" in
   c2-standard-4) VCPU_COUNT=4; FAMILY_CPU_QUOTA="C2_CPUS" ;;
   c2d-highcpu-8) VCPU_COUNT=8; FAMILY_CPU_QUOTA="C2D_CPUS" ;;
 esac
-MINIMUM_VCPU_QUOTA=$((VCPU_COUNT * 2))
-RECOMMENDED_VCPU_QUOTA=$((VCPU_COUNT * 4))
+INITIAL_VM_COUNT=1
+if [[ "$ENABLE_PROTOCOL_VM" == "true" ]]; then INITIAL_VM_COUNT=$((INITIAL_VM_COUNT + 1)); fi
+MINIMUM_VCPU_QUOTA=$((VCPU_COUNT * INITIAL_VM_COUNT))
+RECOMMENDED_VCPU_QUOTA=$((VCPU_COUNT * (INITIAL_VM_COUNT + 2)))
 if ! REGION_QUOTA_JSON="$(gcloud compute regions describe "$REGION" --project="$PROJECT_ID" --format=json)"; then
   fail "Cannot inspect regional quotas for ${REGION}. Check compute.regions.get permission."
 fi
@@ -506,7 +570,7 @@ if ((quota_status == 0)); then
 else
   if ((quota_status == 2)); then
     printf '%s\n' "$QUOTA_REPORT" >&2
-    fail "Current ${REGION} CPU quota is below the ${MINIMUM_VCPU_QUOTA} vCPU minimum for the gateway and protocol VMs. Request quota in Cloud Console or choose a smaller eligible tier."
+    fail "Current ${REGION} CPU quota is below the ${MINIMUM_VCPU_QUOTA} vCPU minimum for ${INITIAL_VM_COUNT} required VM(s). Request quota in Cloud Console or choose a smaller eligible tier."
   elif ((quota_status == 3)); then
     while IFS=$'\t' read -r metric available limit usage; do
       info "Regional quota ${metric}: ${available} CPU(s) free of ${limit} (${usage} in use)."
@@ -628,27 +692,17 @@ PROTOCOL_SECRET_NAME="${SERVICE_NAME}-protocol-config"
 OPENVPN_IMAGE=""
 OPENVPN_SECRET_NAME=""
 OPENVPN_SECRET_VERSION=""
-OPENVPN_STARTUP_COMMAND=":"
 if [[ "$ENABLE_OPENVPN" == "true" ]]; then
   OPENVPN_IMAGE_TAG="openvpn-${DEPLOY_TAG}"
   OPENVPN_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE_NAME}:${OPENVPN_IMAGE_TAG}"
   OPENVPN_SECRET_NAME="${SERVICE_NAME}-openvpn-config"
-  OPENVPN_STARTUP_COMMAND='docker rm --force xgcpx-openvpn >/dev/null 2>&1 || true
-docker run --detach --name xgcpx-openvpn --restart always \
-  --publish 1194:1194/udp \
-  --cap-add=NET_ADMIN \
-  --device /dev/net/tun:/dev/net/tun \
-  --sysctl net.ipv4.ip_forward=1 \
-  --env PROJECT_ID="__PROJECT_ID__" \
-  --env OPENVPN_SECRET_NAME="__OPENVPN_SECRET_NAME__" \
-  "__OPENVPN_IMAGE__"'
-  OPENVPN_STARTUP_COMMAND="${OPENVPN_STARTUP_COMMAND//__PROJECT_ID__/$PROJECT_ID}"
-  OPENVPN_STARTUP_COMMAND="${OPENVPN_STARTUP_COMMAND//__OPENVPN_SECRET_NAME__/$OPENVPN_SECRET_NAME}"
-  OPENVPN_STARTUP_COMMAND="${OPENVPN_STARTUP_COMMAND//__OPENVPN_IMAGE__/$OPENVPN_IMAGE}"
 fi
+PROTOCOL_VM_IMAGE="$PROTOCOL_IMAGE"
+if [[ "$PROTOCOL_RUNTIME" == "cloud-run" ]]; then PROTOCOL_VM_IMAGE=""; fi
 PROTOCOL_STARTUP_SCRIPT="$(cat <<'PROTOCOL_STARTUP_EOF'
 #!/bin/bash
 set -Eeuo pipefail
+export DEBIAN_FRONTEND=noninteractive
 
 metadata="http://metadata.google.internal/computeMetadata/v1"
 daemon_attempt=0
@@ -680,7 +734,7 @@ while [ "$attempt" -lt 12 ]; do
   if [ -n "$access_token" ] \
     && printf '%s' "$access_token" | DOCKER_CONFIG="$DOCKER_CONFIG" docker login \
       --username oauth2accesstoken --password-stdin "https://__REGION__-docker.pkg.dev" \
-    && DOCKER_CONFIG="$DOCKER_CONFIG" docker pull "__PROTOCOL_IMAGE__" \
+    && { [ -z "__PROTOCOL_IMAGE__" ] || DOCKER_CONFIG="$DOCKER_CONFIG" docker pull "__PROTOCOL_IMAGE__"; } \
     && { [ -z "__OPENVPN_IMAGE__" ] || DOCKER_CONFIG="$DOCKER_CONFIG" docker pull "__OPENVPN_IMAGE__"; }; then
     pulled=true
     break
@@ -696,33 +750,44 @@ rm -f -- "$DOCKER_CONFIG/config.json"
 rmdir "$DOCKER_CONFIG"
 trap - EXIT
 
-mkdir -p /var/lib/xgcpx/caddy-data /var/lib/xgcpx/caddy-config
-chown 10001:10001 /var/lib/xgcpx/caddy-data /var/lib/xgcpx/caddy-config
-chmod 0750 /var/lib/xgcpx/caddy-data /var/lib/xgcpx/caddy-config
-docker rm --force xgcpx-protocols >/dev/null 2>&1 || true
-docker run --detach --name xgcpx-protocols --restart always \
-  --publish 80:8080/tcp \
-  --publish 443:8443/tcp \
-  --publish 8080:8081/tcp \
-  --publish 50051:50052/tcp \
-  --publish 8388:8388/tcp \
-  --publish 8388:8388/udp \
-  --volume /var/lib/xgcpx/caddy-data:/data \
-  --volume /var/lib/xgcpx/caddy-config:/config \
-  --env PROJECT_ID="__PROJECT_ID__" \
-  --env PROTOCOL_SECRET_NAME="__PROTOCOL_SECRET_NAME__" \
-  --env RELAY_DOMAIN="__PROTOCOL_DOMAIN__" \
-  "__PROTOCOL_IMAGE__"
-__OPENVPN_STARTUP_COMMAND__
+if [ -n "__PROTOCOL_IMAGE__" ]; then
+  mkdir -p /var/lib/xgcpx/caddy-data /var/lib/xgcpx/caddy-config
+  chown 10001:10001 /var/lib/xgcpx/caddy-data /var/lib/xgcpx/caddy-config
+  chmod 0750 /var/lib/xgcpx/caddy-data /var/lib/xgcpx/caddy-config
+  docker rm --force xgcpx-protocols >/dev/null 2>&1 || true
+  docker run --detach --name xgcpx-protocols --restart always \
+    --publish 80:8080/tcp \
+    --publish 443:8443/tcp \
+    --publish 8080:8081/tcp \
+    --publish 50051:50052/tcp \
+    --publish 8388:8388/tcp \
+    --publish 8388:8388/udp \
+    --volume /var/lib/xgcpx/caddy-data:/data \
+    --volume /var/lib/xgcpx/caddy-config:/config \
+    --env PROJECT_ID="__PROJECT_ID__" \
+    --env PROTOCOL_SECRET_NAME="__PROTOCOL_SECRET_NAME__" \
+    --env RELAY_DOMAIN="__PROTOCOL_DOMAIN__" \
+    "__PROTOCOL_IMAGE__"
+fi
+if [ -n "__OPENVPN_IMAGE__" ]; then
+  docker rm --force xgcpx-openvpn >/dev/null 2>&1 || true
+  docker run --detach --name xgcpx-openvpn --restart always \
+    --publish 1194:1194/udp \
+    --cap-add=NET_ADMIN \
+    --device /dev/net/tun:/dev/net/tun \
+    --sysctl net.ipv4.ip_forward=1 \
+    --env PROJECT_ID="__PROJECT_ID__" \
+    --env OPENVPN_SECRET_NAME="__OPENVPN_SECRET_NAME__" \
+    "__OPENVPN_IMAGE__"
+fi
 PROTOCOL_STARTUP_EOF
 )"
 PROTOCOL_STARTUP_SCRIPT="${PROTOCOL_STARTUP_SCRIPT//__REGION__/$REGION}"
-PROTOCOL_STARTUP_SCRIPT="${PROTOCOL_STARTUP_SCRIPT//__PROTOCOL_IMAGE__/$PROTOCOL_IMAGE}"
+PROTOCOL_STARTUP_SCRIPT="${PROTOCOL_STARTUP_SCRIPT//__PROTOCOL_IMAGE__/$PROTOCOL_VM_IMAGE}"
 PROTOCOL_STARTUP_SCRIPT="${PROTOCOL_STARTUP_SCRIPT//__PROJECT_ID__/$PROJECT_ID}"
 PROTOCOL_STARTUP_SCRIPT="${PROTOCOL_STARTUP_SCRIPT//__PROTOCOL_SECRET_NAME__/$PROTOCOL_SECRET_NAME}"
 PROTOCOL_STARTUP_SCRIPT="${PROTOCOL_STARTUP_SCRIPT//__PROTOCOL_DOMAIN__/$RELAY_DOMAIN}"
 PROTOCOL_STARTUP_SCRIPT="${PROTOCOL_STARTUP_SCRIPT//__OPENVPN_IMAGE__/$OPENVPN_IMAGE}"
-PROTOCOL_STARTUP_SCRIPT="${PROTOCOL_STARTUP_SCRIPT//__OPENVPN_STARTUP_COMMAND__/$OPENVPN_STARTUP_COMMAND}"
 run_with_spinner "Configuring Artifact Registry authentication" gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 run_with_spinner "Building ${GATEWAY} gateway image" docker build --platform linux/amd64 --file "$DOCKERFILE" --tag "$IMAGE" .
 run_with_spinner "Pushing ${GATEWAY} gateway image" docker push "$IMAGE"
@@ -731,7 +796,7 @@ run_with_spinner "Building the built-in Cloud Run API backend" docker build --pl
   --file backend/Dockerfile --tag "$BACKEND_IMAGE" backend
 run_with_spinner "Pushing the built-in Cloud Run API backend" docker push "$BACKEND_IMAGE"
 
-run_with_spinner "Building the authenticated protocol VM image" docker build --platform linux/amd64 --file proxies/xray/Dockerfile --tag "$PROTOCOL_IMAGE" .
+run_with_spinner "Building the Xray protocol runtime image" docker build --platform linux/amd64 --file proxies/xray/Dockerfile --tag "$PROTOCOL_IMAGE" .
 run_with_spinner "Pushing the authenticated protocol VM image" docker push "$PROTOCOL_IMAGE"
 if [[ "$ENABLE_OPENVPN" == "true" ]]; then
   run_with_spinner "Building the OpenVPN VM image" docker build --platform linux/amd64 --file proxies/openvpn/Dockerfile --tag "$OPENVPN_IMAGE" .
@@ -747,7 +812,7 @@ PROTOCOL_CONFIG_FILE="$(mktemp)"
 chmod 0600 "$PROTOCOL_CONFIG_FILE"
 PROTOCOL_TAGS_JSON="$(json_array "${PROTOCOL_TAGS[@]}")"
 SSH_CONFIG_PASSWORD=""
-if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 9 "* ]]; then SSH_CONFIG_PASSWORD="$SSH_PASSWORD"; fi
+if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 8 "* ]]; then SSH_CONFIG_PASSWORD="$SSH_PASSWORD"; fi
 PROTOCOL_TAGS_JSON="$PROTOCOL_TAGS_JSON" \
 VLESS_UUID="$PROTOCOL_UUID" \
 VMESS_UUID="$VMESS_UUID" \
@@ -793,6 +858,113 @@ with open(output_path, "w", encoding="utf-8") as destination:
     )
     destination.write("\n")
 PY
+
+# Write private client configs only after Terraform apply succeeds.
+generate_client_profiles() {
+  CLIENT_PROFILE_REPORT="$(PROTOCOL_TAGS_JSON="$(json_array "${PROTOCOL_TAGS[@]}")" \
+VLESS_UUID="$PROTOCOL_UUID" \
+VMESS_UUID="$VMESS_UUID" \
+SHADOWSOCKS_PASSWORD="$SHADOWSOCKS_PASSWORD" \
+TROJAN_PASSWORD="$TROJAN_PASSWORD" \
+EDGE_DOMAIN="$DOMAIN" \
+RELAY_DOMAIN="$RELAY_DOMAIN" \
+DEPLOY_TAG="$DEPLOY_TAG" \
+python3 - "$PWD" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+selected = set(json.loads(os.environ["PROTOCOL_TAGS_JSON"]))
+edge_domain = os.environ["EDGE_DOMAIN"]
+relay_domain = os.environ["RELAY_DOMAIN"]
+vless_uuid = os.environ["VLESS_UUID"]
+vmess_uuid = os.environ["VMESS_UUID"]
+shadowsocks_password = os.environ["SHADOWSOCKS_PASSWORD"]
+trojan_password = os.environ["TROJAN_PASSWORD"]
+deploy_tag = os.environ["DEPLOY_TAG"]
+directory = Path(sys.argv[1])
+paths = {
+  "vless-ws": ("vless", "ws", "/vless-ws", None),
+  "vless-httpupgrade": ("vless", "httpupgrade", "/vless-httpupgrade", None),
+  "vless-grpc": ("vless", "grpc", None, None),
+  "xhttp-packet": ("vless", "xhttp", "/xhttp-packet", "packet-up"),
+  "xhttp-chunked": ("vless", "xhttp", "/xhttp-chunked", "stream-up"),
+  "xhttp-request-response": ("vless", "xhttp", "/xhttp-request-response", "stream-one"),
+  "trojan-ws": ("trojan", "ws", "/trojan-ws", None),
+  "trojan-httpupgrade": ("trojan", "httpupgrade", "/trojan-httpupgrade", None),
+  "vmess-ws": ("vmess", "ws", "/vmess-ws", None),
+}
+tag_order = [
+  "vless-ws", "vless-httpupgrade", "vless-grpc", "xhttp-packet",
+  "xhttp-chunked", "xhttp-request-response", "trojan-ws",
+  "trojan-httpupgrade", "vmess-ws", "shadowsocks",
+]
+report = []
+for index, tag in enumerate(item for item in tag_order if item in selected):
+  local_port = 10808 + index
+  if tag == "shadowsocks":
+    outbound = {
+      "tag": "proxy",
+      "protocol": "shadowsocks",
+      "settings": {"servers": [{
+        "address": relay_domain,
+        "port": 8388,
+        "method": "chacha20-ietf-poly1305",
+        "password": shadowsocks_password,
+      }]},
+      "mux": {"enabled": True, "concurrency": 8},
+    }
+  else:
+    protocol, network, path, mode = paths[tag]
+    if protocol == "vless":
+      settings = {"vnext": [{"address": edge_domain, "port": 443, "users": [{"id": vless_uuid, "encryption": "none"}]}]}
+    elif protocol == "vmess":
+      settings = {"vnext": [{"address": edge_domain, "port": 443, "users": [{"id": vmess_uuid, "alterId": 0, "security": "auto"}]}]}
+    else:
+      settings = {"servers": [{"address": edge_domain, "port": 443, "password": trojan_password}]}
+    stream_settings = {
+      "network": network,
+      "security": "tls",
+      "tlsSettings": {"serverName": edge_domain, "allowInsecure": False},
+    }
+    if network == "ws":
+      stream_settings["wsSettings"] = {"path": path}
+    elif network == "httpupgrade":
+      stream_settings["httpupgradeSettings"] = {"path": path}
+    elif network == "grpc":
+      stream_settings["grpcSettings"] = {"serviceName": "vless-grpc"}
+    elif network == "xhttp":
+      stream_settings["xhttpSettings"] = {"path": path, "mode": mode}
+    outbound = {
+      "tag": "proxy",
+      "protocol": protocol,
+      "settings": settings,
+      "streamSettings": stream_settings,
+      "mux": {"enabled": True, "concurrency": 8},
+    }
+  config = {
+    "log": {"loglevel": "warning"},
+    "inbounds": [{
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "port": local_port,
+      "protocol": "socks",
+      "settings": {"auth": "noauth", "udp": True},
+    }],
+    "outbounds": [outbound, {"tag": "direct", "protocol": "freedom"}],
+  }
+  profile = directory / f"xray-client-{deploy_tag}-{tag}.json"
+  descriptor = os.open(profile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+  with os.fdopen(descriptor, "w", encoding="utf-8") as destination:
+    json.dump(config, destination, indent=2)
+    destination.write("\n")
+  os.chmod(profile, 0o600)
+  report.append(f"{tag}: {profile} (local SOCKS 127.0.0.1:{local_port}; mux enabled)")
+print("\n".join(report))
+PY
+  )"
+}
 
 if ! gcloud secrets describe "$PROTOCOL_SECRET_NAME" --project="$PROJECT_ID" >/dev/null 2>&1; then
   gcloud secrets create "$PROTOCOL_SECRET_NAME" --replication-policy=automatic --project="$PROJECT_ID"
@@ -868,7 +1040,9 @@ export TF_VAR_blocked_cidrs="$(json_array "${BLOCKED_CIDRS[@]}")"
 export TF_VAR_allowed_cidrs="$(json_array "${ALLOWED_CIDRS[@]}")"
 export TF_VAR_tcp_upstream_host="$TCP_UPSTREAM_HOST"
 export TF_VAR_tls_upstream_host="$TLS_UPSTREAM_HOST"
-export TF_VAR_enable_protocol_gateway=true
+export TF_VAR_protocol_runtime="$PROTOCOL_RUNTIME"
+export TF_VAR_enable_cloudrun_protocols="$ENABLE_CLOUDRUN_PROTOCOLS"
+export TF_VAR_enable_protocol_gateway="$ENABLE_PROTOCOL_VM"
 export TF_VAR_protocol_image="$PROTOCOL_IMAGE"
 export TF_VAR_protocol_domain="$RELAY_DOMAIN"
 export TF_VAR_protocol_secret_name="$PROTOCOL_SECRET_NAME"
@@ -904,6 +1078,7 @@ if ! run_with_spinner "Applying the verified Terraform plan" \
 fi
 rm -f -- "$TERRAFORM_PLAN_FILE"
 TERRAFORM_PLAN_FILE=""
+generate_client_profiles
 
 LB_IP="$(terraform -chdir=terraform output -raw load_balancer_ip)"
 section "COMPLETE  |  Deployment outputs"
@@ -917,51 +1092,64 @@ printf '%s\n' \
   "  Health: /healthz | API: /api/* (built-in sidecar unless an external upstream is supplied)" \
   "  WebSocket/gRPC: requires a compatible application upstream; Cloud Run carries these over HTTP(S)" \
   "  Persistent streaming: /persistent/* | Assets: /assets/*" \
-  "  These HTTP routes do not provide SSH or OpenVPN transport."
+  "  Selected HTTP protocol paths use the Cloud Run Xray sidecar or protocol VM, based on runtime mode." \
+  "  Raw SSH and OpenVPN TCP/UDP sockets are not exposed by Cloud Run."
 if [[ "$ENABLE_TCP_PROXY" == "true" ]]; then
   printf 'Envoy TCP endpoint: %s:9000\nEnvoy TLS passthrough endpoint: %s:9443\n' \
     "$(terraform -chdir=terraform output -raw tcp_proxy_ip)" \
     "$(terraform -chdir=terraform output -raw tls_proxy_ip)"
 fi
 
-PROTOCOL_IP="$(terraform -chdir=terraform output -raw protocol_gateway_ip)"
-printf '\n%s\n' \
-  "Protocol VM public IP: ${PROTOCOL_IP}" \
-  "Protocol hostname: ${RELAY_DOMAIN} (create its A record directly to ${PROTOCOL_IP})" \
-  "The protocol VM firewall is public; VLESS/Shadowsocks require credentials and OpenVPN requires the generated client certificate."
+PROTOCOL_IP=""
+if [[ "$ENABLE_PROTOCOL_VM" == "true" ]]; then
+  PROTOCOL_IP="$(terraform -chdir=terraform output -raw protocol_gateway_ip)"
+  printf '\n%s\n' "Protocol VM public IP: ${PROTOCOL_IP}"
+  if [[ "$PROTOCOL_RUNTIME" == "vm" ]]; then
+    printf 'Protocol hostname: %s (create its A record directly to %s)\n' "$RELAY_DOMAIN" "$PROTOCOL_IP"
+    info "The protocol VM firewall is public; protocol credentials are required."
+  else
+    info "This protocol VM runs OpenVPN only; HTTP transports run in the Cloud Run sidecar."
+  fi
+else
+  info "No protocol VM was selected; HTTP transports run entirely within the Cloud Run revision."
+fi
+printf 'Cloud Run protocol edge: https://%s (selected HTTP-compatible paths route to the selected protocol runtime)\n' "$DOMAIN"
 printf '%s\n' "Enabled protocol endpoints and credentials:"
+if [[ -n "$CLIENT_PROFILE_REPORT" ]]; then
+  printf 'Generated Xray client profiles (mux enabled):\n%s\n' "$CLIENT_PROFILE_REPORT"
+fi
 if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 1 "* || " ${PROTOCOL_OPTIONS[*]} " == *" 2 "* || " ${PROTOCOL_OPTIONS[*]} " == *" 3 "* ]]; then
   printf '  VLESS client ID (UUID): %s\n' "$PROTOCOL_UUID"
-  printf '  VLESS TLS server name: %s\n' "$RELAY_DOMAIN"
+  printf '  VLESS TLS server name: %s\n' "$DOMAIN"
 fi
 if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 1 "* ]]; then
-  printf '  VLESS over TLS/WebSocket: %s:443, path /vless-ws\n' "$RELAY_DOMAIN"
-  printf '  VLESS over TLS/HTTPUpgrade: %s:443, path /vless-httpupgrade\n' "$RELAY_DOMAIN"
+  printf '  VLESS over TLS/WebSocket via Cloud Run: %s:443, path /vless-ws\n' "$DOMAIN"
+  printf '  VLESS over TLS/HTTPUpgrade via Cloud Run: %s:443, path /vless-httpupgrade\n' "$DOMAIN"
 fi
 if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 2 "* ]]; then
-  printf '  VLESS over TLS/gRPC: %s:443 (or :50051), service name vless-grpc\n' "$RELAY_DOMAIN"
+  printf '  VLESS over TLS/gRPC via Cloud Run: %s:443, service name vless-grpc; direct relay: %s:50051\n' "$DOMAIN" "$RELAY_DOMAIN"
 fi
 if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 3 "* ]]; then
-  printf '  VLESS xHTTP/TLS packet-up: %s:443 or :8080, path /xhttp-packet\n' "$RELAY_DOMAIN"
-  printf '  VLESS xHTTP/TLS stream-up: %s:443 or :8080, path /xhttp-chunked\n' "$RELAY_DOMAIN"
-  printf '  VLESS xHTTP/TLS stream-one: %s:443 or :8080, path /xhttp-request-response\n' "$RELAY_DOMAIN"
+  printf '  VLESS xHTTP/TLS packet-up: %s:443, path /xhttp-packet (direct relay port 8080)\n' "$DOMAIN"
+  printf '  VLESS xHTTP/TLS stream-up: %s:443, path /xhttp-chunked (direct relay port 8080)\n' "$DOMAIN"
+  printf '  VLESS xHTTP/TLS stream-one: %s:443, path /xhttp-request-response (direct relay port 8080)\n' "$DOMAIN"
 fi
 if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 4 "* ]]; then
   printf '  Shadowsocks: %s:8388 (TCP and UDP), method chacha20-ietf-poly1305\n  Shadowsocks password: %s\n' \
     "$RELAY_DOMAIN" "$SHADOWSOCKS_PASSWORD"
 fi
+if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 6 "* ]]; then
+  printf '  Trojan over TLS/WebSocket via Cloud Run: %s:443, path /trojan-ws\n  Trojan over TLS/HTTPUpgrade via Cloud Run: %s:443, path /trojan-httpupgrade\n  Trojan password: %s\n' \
+    "$DOMAIN" "$DOMAIN" "$TROJAN_PASSWORD"
+fi
 if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 7 "* ]]; then
-  printf '  Trojan over TLS/WebSocket: %s:443, path /trojan-ws\n  Trojan password: %s\n' \
-    "$RELAY_DOMAIN" "$TROJAN_PASSWORD"
+  printf '  VMess over TLS/WebSocket via Cloud Run: %s:443, path /vmess-ws\n  VMess client ID (UUID): %s\n' \
+    "$DOMAIN" "$VMESS_UUID"
 fi
 if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 8 "* ]]; then
-  printf '  VMess over TLS/WebSocket: %s:443, path /vmess-ws\n  VMess client ID (UUID): %s\n' \
-    "$RELAY_DOMAIN" "$VMESS_UUID"
-fi
-if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 9 "* ]]; then
-  printf '  SSH over TLS/WebSocket: %s:443, path /ssh-ws (install websocat for the SSH client)\n' "$RELAY_DOMAIN"
+  printf '  SSH over TLS/WebSocket via Cloud Run: %s:443, path /ssh-ws (install websocat for the SSH client)\n' "$DOMAIN"
   printf '  SSH username: xgcpx\n  SSH password: %s\n' "$SSH_PASSWORD"
-  printf '  SSH command: ssh -o "ProxyCommand=websocat -E wss://%s/ssh-ws" xgcpx@%s\n' "$RELAY_DOMAIN" "$RELAY_DOMAIN"
+  printf '  SSH via Cloud Run edge: ssh -o "ProxyCommand=websocat -E wss://%s/ssh-ws" xgcpx@%s\n' "$DOMAIN" "$DOMAIN"
 fi
 if [[ "$ENABLE_OPENVPN" == "true" ]]; then
   OPENVPN_CLIENT_CONFIG="${PWD}/openvpn-client-${DEPLOY_TAG}.ovpn"
@@ -984,5 +1172,5 @@ if [[ "$ENABLE_OPENVPN" == "true" ]]; then
   printf '  OpenVPN client profile: %s (private file, mode 0600)\n' "$OPENVPN_CLIENT_CONFIG"
 fi
 printf 'Selected protocols: %s\n' "${PROTOCOL_OPTIONS[*]}"
-warn "Store printed credentials and the OpenVPN profile securely. SSH-over-WebSocket, when selected, is a password-authenticated VM service, not a Cloud Run feature."
-warn "The protocol VM IP is a separate endpoint, not the Cloud Run load-balancer IP. Cloud Run cannot relay raw OpenVPN UDP."
+warn "Store printed credentials, generated Xray client profiles, and the OpenVPN profile securely; all are private credentials."
+warn "If enabled, the protocol VM IP is separate from the Cloud Run load-balancer IP. Cloud Run cannot expose raw OpenVPN UDP."

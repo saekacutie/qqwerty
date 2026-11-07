@@ -1,4 +1,6 @@
 .git
+.vscode/
+.idea/
 .terraform
 terraform/
 backend/
@@ -6,6 +8,14 @@ backend/
 /deploy.sh
 /entrypoint.sh
 /banner.txt
+**/.DS_Store
+**/*.swp
+**/*.swo
+**/.cache/
+**/.pytest_cache/
+**/.mypy_cache/
+**/dist/
+**/build/
 *.log
 .env
 .env.*
@@ -16,6 +26,7 @@ backend/
 *.p12
 *.pfx
 *.ovpn
+xray-client-*.json
 *service-account*.json
 credentials.json
 secrets/

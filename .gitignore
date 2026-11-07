@@ -6,3 +6,4 @@ crash.log
 .env
 *.log
 openvpn-client-*.ovpn
+xray-client-*.json

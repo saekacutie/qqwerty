@@ -29,6 +29,22 @@ static_resources:
                       routes:
                         - match: { path: /healthz }
                           direct_response: { status: 200, body: { inline_string: '{"status":"ok"}' } }
+                        - match: { prefix: /vless-grpc/ }
+                          route: { cluster: protocol_upstream_h2, timeout: 3600s, host_rewrite_literal: "${PROTOCOL_HOST}" }
+                        - match: { prefix: /vless-ws }
+                          route: { cluster: protocol_upstream_h1, timeout: 3600s, host_rewrite_literal: "${PROTOCOL_HOST}" }
+                        - match: { prefix: /vless-httpupgrade }
+                          route: { cluster: protocol_upstream_h1, timeout: 3600s, host_rewrite_literal: "${PROTOCOL_HOST}" }
+                        - match: { prefix: /xhttp- }
+                          route: { cluster: protocol_upstream_h1, timeout: 3600s, host_rewrite_literal: "${PROTOCOL_HOST}" }
+                        - match: { prefix: /trojan-ws }
+                          route: { cluster: protocol_upstream_h1, timeout: 3600s, host_rewrite_literal: "${PROTOCOL_HOST}" }
+                        - match: { prefix: /trojan-httpupgrade }
+                          route: { cluster: protocol_upstream_h1, timeout: 3600s, host_rewrite_literal: "${PROTOCOL_HOST}" }
+                        - match: { prefix: /vmess-ws }
+                          route: { cluster: protocol_upstream_h1, timeout: 3600s, host_rewrite_literal: "${PROTOCOL_HOST}" }
+                        - match: { prefix: /ssh-ws }
+                          route: { cluster: protocol_upstream_h1, timeout: 3600s, host_rewrite_literal: "${PROTOCOL_HOST}" }
                         - match: { prefix: /assets/ }
                           response_headers_to_add:
                             - header: { key: Cache-Control, value: "public, max-age=300" }
@@ -106,3 +122,28 @@ static_resources:
         endpoints:
           - lb_endpoints:
               - endpoint: { address: { socket_address: { address: "${TLS_HOST}", port_value: ${TLS_PORT} } } }
+    - name: protocol_upstream_h1
+      type: STRICT_DNS
+      connect_timeout: 5s
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: protocol_upstream_h1
+        endpoints:
+          - lb_endpoints:
+              - endpoint: { address: { socket_address: { address: "${PROTOCOL_HOST}", port_value: ${PROTOCOL_PORT} } } }
+      ${PROTOCOL_TRANSPORT_SOCKET}
+    - name: protocol_upstream_h2
+      type: STRICT_DNS
+      connect_timeout: 5s
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: protocol_upstream_h2
+        endpoints:
+          - lb_endpoints:
+              - endpoint: { address: { socket_address: { address: "${PROTOCOL_HOST}", port_value: ${PROTOCOL_PORT} } } }
+      ${PROTOCOL_TRANSPORT_SOCKET}

@@ -12,6 +12,6 @@ grpc_upstream() {
 UPSTREAM_GRPC_PRIMARY="$(grpc_upstream "$UPSTREAM_PRIMARY")"
 UPSTREAM_GRPC_FALLBACK="$(grpc_upstream "$UPSTREAM_FALLBACK")"
 export UPSTREAM_GRPC_PRIMARY UPSTREAM_GRPC_FALLBACK
-envsubst '${UPSTREAM_PRIMARY} ${UPSTREAM_FALLBACK} ${UPSTREAM_GRPC_PRIMARY} ${UPSTREAM_GRPC_FALLBACK}' \
+envsubst '${UPSTREAM_PRIMARY} ${UPSTREAM_FALLBACK} ${UPSTREAM_GRPC_PRIMARY} ${UPSTREAM_GRPC_FALLBACK} ${PROTOCOL_UPSTREAM}' \
   < /etc/traefik/dynamic.yml.template > /etc/traefik/dynamic.yml
 exec traefik --configFile=/etc/traefik/traefik.yml

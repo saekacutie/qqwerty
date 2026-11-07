@@ -1,0 +1,46 @@
+{
+	admin off
+	auto_https off
+	http_port 8082
+	servers {
+		protocols h1 h2 h2c
+	}
+}
+
+:8082 {
+	route {
+		@grpc path /vless-grpc/*
+		reverse_proxy @grpc h2c://127.0.0.1:10003
+
+		@vless_ws path /vless-ws
+		reverse_proxy @vless_ws 127.0.0.1:10001
+
+		@vless_httpupgrade path /vless-httpupgrade
+		reverse_proxy @vless_httpupgrade 127.0.0.1:10002
+
+		@trojan_ws path /trojan-ws
+		reverse_proxy @trojan_ws 127.0.0.1:10007
+
+		@trojan_httpupgrade path /trojan-httpupgrade
+		reverse_proxy @trojan_httpupgrade 127.0.0.1:10010
+
+		@vmess_ws path /vmess-ws
+		reverse_proxy @vmess_ws 127.0.0.1:10008
+
+		@ssh_ws path /ssh-ws
+		reverse_proxy @ssh_ws 127.0.0.1:10009
+
+		@xhttp_packet path /xhttp-packet*
+		reverse_proxy @xhttp_packet 127.0.0.1:10004
+
+		@xhttp_chunked path /xhttp-chunked*
+		reverse_proxy @xhttp_chunked 127.0.0.1:10005
+
+		@xhttp_request_response path /xhttp-request-response*
+		reverse_proxy @xhttp_request_response 127.0.0.1:10006
+
+		handle {
+			respond "not found" 404
+		}
+	}
+}

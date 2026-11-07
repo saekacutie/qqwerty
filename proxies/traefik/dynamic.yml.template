@@ -20,6 +20,16 @@ http:
       priority: 100
       service: grpc-pool
       middlewares: [gateway-headers]
+    protocol-grpc:
+      rule: PathPrefix(`/vless-grpc/`)
+      priority: 1000
+      service: protocol-pool
+      middlewares: [gateway-headers]
+    protocol-http:
+      rule: Path(`/vless-ws`) || Path(`/vless-httpupgrade`) || PathPrefix(`/xhttp-`) || Path(`/trojan-ws`) || Path(`/trojan-httpupgrade`) || Path(`/vmess-ws`) || Path(`/ssh-ws`)
+      priority: 1000
+      service: protocol-pool
+      middlewares: [gateway-headers]
     api:
       rule: PathPrefix(`/api/`)
       service: api-pool
@@ -44,4 +54,9 @@ http:
         servers:
           - url: "${UPSTREAM_GRPC_PRIMARY}"
           - url: "${UPSTREAM_GRPC_FALLBACK}"
+        passHostHeader: false
+    protocol-pool:
+      loadBalancer:
+        servers:
+          - url: "${PROTOCOL_UPSTREAM}"
         passHostHeader: false

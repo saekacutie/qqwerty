@@ -46,12 +46,32 @@ if [ "$PRIMARY_SCHEME" = https ]; then
                 - san_type: DNS
                   matcher: { exact: \"${PRIMARY_HOST}\" }"
 fi
+protocol_values="$(parse_upstream "$PROTOCOL_UPSTREAM")"
+PROTOCOL_SCHEME="$(printf '%s\n' "$protocol_values" | sed -n '1p')"
+PROTOCOL_HOST="$(printf '%s\n' "$protocol_values" | sed -n '2p')"
+PROTOCOL_PORT="$(printf '%s\n' "$protocol_values" | sed -n '3p')"
+PROTOCOL_TRANSPORT_SOCKET=""
+if [ "$PROTOCOL_SCHEME" = https ]; then
+  PROTOCOL_TRANSPORT_SOCKET="transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          \"@type\": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: \"${PROTOCOL_HOST}\"
+          common_tls_context:
+            validation_context:
+              trusted_ca:
+                filename: /etc/ssl/certs/ca-certificates.crt
+              match_typed_subject_alt_names:
+                - san_type: DNS
+                  matcher: { exact: \"${PROTOCOL_HOST}\" }"
+fi
+export PROTOCOL_HOST PROTOCOL_PORT PROTOCOL_TRANSPORT_SOCKET
 TCP_HOST="${TCP_UPSTREAM_HOST%:*}"
 TCP_PORT="${TCP_UPSTREAM_HOST##*:}"
 TLS_HOST="${TLS_UPSTREAM_HOST%:*}"
 TLS_PORT="${TLS_UPSTREAM_HOST##*:}"
 export TCP_HOST TCP_PORT TLS_HOST TLS_PORT
-envsubst '${PRIMARY_HOST} ${PRIMARY_PORT} ${FALLBACK_HOST} ${FALLBACK_PORT} ${UPSTREAM_TRANSPORT_SOCKET} ${TCP_HOST} ${TCP_PORT} ${TLS_HOST} ${TLS_PORT}' \
+envsubst '${PRIMARY_HOST} ${PRIMARY_PORT} ${FALLBACK_HOST} ${FALLBACK_PORT} ${UPSTREAM_TRANSPORT_SOCKET} ${PROTOCOL_HOST} ${PROTOCOL_PORT} ${PROTOCOL_TRANSPORT_SOCKET} ${TCP_HOST} ${TCP_PORT} ${TLS_HOST} ${TLS_PORT}' \
   < /etc/envoy/envoy.yaml.template > /tmp/envoy.yaml
 if [ "${ENVOY_VALIDATE:-false}" = "true" ]; then
   exec envoy --mode validate -c /tmp/envoy.yaml

@@ -9,6 +9,10 @@ upstream xgcpx_api {
     server ${UPSTREAM_FALLBACK_HOST}:${UPSTREAM_FALLBACK_PORT} backup;
     keepalive 64;
 }
+upstream xgcpx_protocol {
+    server ${PROTOCOL_UPSTREAM_HOST}:${PROTOCOL_UPSTREAM_PORT};
+    keepalive 32;
+}
 server {
     listen 8080;
     http2 on;
@@ -24,6 +28,32 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     error_page 418 = @grpc;
     location = /healthz { access_log off; add_header Cache-Control "no-store"; return 200 '{"status":"ok"}'; }
+    location /vless-grpc/ {
+        grpc_pass ${PROTOCOL_GRPC_SCHEME}://xgcpx_protocol;
+        grpc_connect_timeout 10s;
+        grpc_read_timeout 3600s;
+        grpc_send_timeout 3600s;
+        grpc_ssl_server_name on;
+        grpc_ssl_name ${PROTOCOL_UPSTREAM_HOST};
+        grpc_ssl_verify on;
+        grpc_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        grpc_set_header Host ${PROTOCOL_UPSTREAM_HOST};
+        grpc_next_upstream error timeout;
+    }
+    location ~ ^/(vless-ws|vless-httpupgrade|xhttp-packet|xhttp-chunked|xhttp-request-response|trojan-ws|trojan-httpupgrade|vmess-ws|ssh-ws)(/.*)?$ {
+        proxy_pass ${PROTOCOL_UPSTREAM_SCHEME}://xgcpx_protocol;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${PROTOCOL_UPSTREAM_HOST};
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_set_header Host ${PROTOCOL_UPSTREAM_HOST};
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
     location /assets/ {
         add_header Cache-Control "public, max-age=300, stale-while-revalidate=30" always;
         proxy_pass ${UPSTREAM_PRIMARY_SCHEME}://xgcpx_api;

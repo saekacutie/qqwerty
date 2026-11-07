@@ -112,6 +112,19 @@
       }
     },
     {
+      "tag": "trojan-httpupgrade",
+      "listen": "127.0.0.1",
+      "port": 10010,
+      "protocol": "trojan",
+      "settings": {
+        "clients": [{ "password": "__TROJAN_PASSWORD__" }]
+      },
+      "streamSettings": {
+        "network": "httpupgrade",
+        "httpupgradeSettings": { "path": "/trojan-httpupgrade" }
+      }
+    },
+    {
       "tag": "vmess-ws",
       "listen": "127.0.0.1",
       "port": 10008,

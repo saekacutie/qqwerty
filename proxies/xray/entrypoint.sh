@@ -65,7 +65,11 @@ fi
 
 su-exec 10001:10001 xray run -config /tmp/xray-config.json &
 xray_pid=$!
-su-exec 10001:10001 caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
+caddy_config=/etc/caddy/Caddyfile
+if [ "${PROTOCOL_HTTP_ONLY:-false}" = "true" ]; then
+  caddy_config=/etc/caddy/Caddyfile.cloudrun
+fi
+su-exec 10001:10001 caddy run --config "$caddy_config" --adapter caddyfile &
 caddy_pid=$!
 stop_services() {
   kill "$xray_pid" "$caddy_pid" 2>/dev/null || true

@@ -23,6 +23,9 @@ http://{$RELAY_DOMAIN} {
 		@trojan_ws path /trojan-ws
 		reverse_proxy @trojan_ws 127.0.0.1:10007
 
+		@trojan_httpupgrade path /trojan-httpupgrade
+		reverse_proxy @trojan_httpupgrade 127.0.0.1:10010
+
 		@vmess_ws path /vmess-ws
 		reverse_proxy @vmess_ws 127.0.0.1:10008
 

@@ -33,6 +33,23 @@
 		header Cache-Control "no-store"
 		respond `{"status":"ok"}` 200
 	}
+	@protocol_grpc path /vless-grpc/*
+	handle @protocol_grpc {
+		reverse_proxy {$PROTOCOL_UPSTREAM} {
+			header_up Host {$PROTOCOL_UPSTREAM_HOST}
+			flush_interval -1
+			transport http {
+				versions 2
+			}
+		}
+	}
+	@protocol_http path /vless-ws /vless-httpupgrade /xhttp-* /trojan-ws /trojan-httpupgrade /vmess-ws /ssh-ws
+	handle @protocol_http {
+		reverse_proxy {$PROTOCOL_UPSTREAM} {
+			header_up Host {$PROTOCOL_UPSTREAM_HOST}
+			flush_interval -1
+		}
+	}
 	# reverse_proxy handles WebSocket upgrades; immediate flushing supports streaming responses.
 	@api path /api/*
 	handle @api {

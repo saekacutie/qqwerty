@@ -30,13 +30,30 @@ variable "backend_image" {
 }
 
 variable "enable_protocol_gateway" {
-  description = "Create a public, authenticated protocol VM with a dedicated static IP."
+  description = "Create the protocol VM for hybrid runtime or VM-only OpenVPN in Cloud Run runtime."
+  type        = bool
+  default     = false
+}
+
+variable "protocol_runtime" {
+  description = "Run Xray transports on the protocol VM or in a Cloud Run sidecar."
+  type        = string
+  default     = "vm"
+
+  validation {
+    condition     = contains(["vm", "cloud-run"], var.protocol_runtime)
+    error_message = "protocol_runtime must be vm or cloud-run."
+  }
+}
+
+variable "enable_cloudrun_protocols" {
+  description = "Run the selected HTTP-compatible Xray transports in a Cloud Run sidecar."
   type        = bool
   default     = false
 }
 
 variable "protocol_image" {
-  description = "Caddy and Xray image for the dedicated protocol VM."
+  description = "Caddy, Xray, and optional SSH image for the protocol VM or Cloud Run sidecar."
   type        = string
   default     = ""
 }
