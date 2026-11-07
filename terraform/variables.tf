@@ -160,13 +160,20 @@ variable "machine_type" {
   }
 }
 
+variable "use_cloud_run_host" {
+  description = "Skip the load balancer, managed certificate, and Cloud Armor; serve the automatic *.run.app host directly."
+  type        = bool
+  default     = false
+}
+
 variable "domain" {
-  description = "DNS hostname for the external HTTPS load balancer's Google-managed certificate."
+  description = "Public hostname. With use_cloud_run_host this is the predicted or actual run.app host and no certificate is created for it."
   type        = string
+  default     = ""
 
   validation {
-    condition     = can(regex("^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,}$", var.domain))
-    error_message = "domain must be a fully qualified DNS hostname."
+    condition     = var.domain == "" || can(regex("^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,}$", var.domain))
+    error_message = "domain must be empty or a fully qualified DNS hostname."
   }
 }
 
