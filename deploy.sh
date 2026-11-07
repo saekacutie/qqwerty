@@ -137,12 +137,33 @@ if ! gcloud auth print-access-token --account="$ACTIVE_ACCOUNT" >/dev/null 2>&1;
   fail "The active gcloud account cannot obtain an access token. Re-authenticate with 'gcloud auth login' and confirm this account has access to project ${PROJECT_ID}."
 fi
 
+printf '\n%s\n' "xgcpx | GCP Gateway Deployment"
+printf 'Project: %s | Account: %s\n\n' "$PROJECT_ID" "$ACTIVE_ACCOUNT"
+
+# Enable APIs before project, billing, region, or Terraform preflight checks.
+section "PREFLIGHT  |  Enable required Google Cloud APIs"
+REQUIRED_APIS=(
+  serviceusage.googleapis.com
+  cloudresourcemanager.googleapis.com
+  compute.googleapis.com
+  run.googleapis.com
+  artifactregistry.googleapis.com
+  iam.googleapis.com
+  logging.googleapis.com
+  storage.googleapis.com
+  secretmanager.googleapis.com
+  cloudbilling.googleapis.com
+)
+if ! run_with_spinner "Enable required APIs in ${PROJECT_ID}" \
+  gcloud services enable "${REQUIRED_APIS[@]}" --project="$PROJECT_ID" --quiet; then
+  fail "Required APIs could not be enabled. Grant serviceusage.services.enable (typically roles/serviceusage.serviceUsageAdmin) and check organization policy."
+fi
+
 if [[ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
   [[ -r "$GOOGLE_APPLICATION_CREDENTIALS" ]] \
     || fail "GOOGLE_APPLICATION_CREDENTIALS is set but unreadable: ${GOOGLE_APPLICATION_CREDENTIALS}"
   if ! python3 - "$GOOGLE_APPLICATION_CREDENTIALS" <<'PY'
 import json
-import re
 import sys
 
 try:
@@ -160,27 +181,6 @@ PY
   fi
 elif ! gcloud auth application-default print-access-token >/dev/null 2>&1; then
   fail "Terraform has no Application Default Credentials (ADC). Run 'gcloud auth application-default login' or set GOOGLE_APPLICATION_CREDENTIALS to a valid credential file. The gcloud login and Terraform ADC are separate."
-fi
-
-printf '\n%s\n' "xgcpx | GCP Gateway Deployment"
-printf 'Project: %s | Account: %s\n\n' "$PROJECT_ID" "$ACTIVE_ACCOUNT"
-
-section "PREFLIGHT  |  Enable required Google Cloud APIs"
-REQUIRED_APIS=(
-  serviceusage.googleapis.com
-  cloudresourcemanager.googleapis.com
-  compute.googleapis.com
-  run.googleapis.com
-  artifactregistry.googleapis.com
-  iam.googleapis.com
-  logging.googleapis.com
-  storage.googleapis.com
-  secretmanager.googleapis.com
-  cloudbilling.googleapis.com
-)
-if ! run_with_spinner "Enable required APIs in ${PROJECT_ID}" \
-  gcloud services enable "${REQUIRED_APIS[@]}" --project="$PROJECT_ID" --quiet; then
-  fail "Required APIs could not be enabled. Grant serviceusage.services.enable (typically roles/serviceusage.serviceUsageAdmin) and check organization policy."
 fi
 
 PROJECT_STATUS="$(gcloud projects describe "$PROJECT_ID" --format='value(lifecycleState)' 2>/dev/null)" \
