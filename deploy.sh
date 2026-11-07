@@ -720,6 +720,75 @@ PY
 )"; then
   fail "Unable to parse live Cloud Run, Compute Engine, or machine-type region responses."
 fi
+# Honor the organization policy constraints/gcp.resourceLocations (common in lab and enterprise projects):
+# drop regions where Cloud Run, Artifact Registry or the state bucket could not be created.
+POLICY_JSON_FILE="$(mktemp "${TMPDIR:-/tmp}/xgcpx-location-policy.XXXXXX")"
+{
+  gcloud org-policies describe gcp.resourceLocations --effective --project="$PROJECT_ID" --format=json 2>/dev/null \
+    || gcloud resource-manager org-policies describe gcp.resourceLocations --effective --project="$PROJECT_ID" --format=json 2>/dev/null \
+    || printf '{}'
+} >"$POLICY_JSON_FILE"
+if ! POLICY_FILTERED="$(python3 - "$POLICY_JSON_FILE" "$REGION_ROWS" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        policy = json.load(source)
+except ValueError:
+    policy = {}
+rows = [row for row in sys.argv[2].split("\n") if row]
+allowed, denied = set(), set()
+
+def collect(node):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "allowedValues":
+                allowed.update(value)
+            elif key == "deniedValues":
+                denied.update(value)
+            else:
+                collect(value)
+    elif isinstance(node, list):
+        for item in node:
+            collect(item)
+
+collect(policy)
+
+def matches(region, values):
+    for value in values:
+        value = value.strip()
+        if value.startswith("in:"):
+            value = value[3:]
+        if value.endswith("-locations"):
+            group = value[: -len("-locations")]
+            group = "europe" if group == "eu" else group
+            if region == group or region.startswith(group + "-"):
+                return True
+        elif value == region:
+            return True
+    return False
+
+kept = []
+for row in rows:
+    name = row.split("\t", 1)[0]
+    if allowed and not matches(name, allowed):
+        continue
+    if matches(name, denied):
+        continue
+    kept.append(row)
+print("\n".join(kept))
+if len(kept) != len(rows):
+    print("REMOVED=%d" % (len(rows) - len(kept)), file=sys.stderr)
+PY
+)"; then
+  POLICY_FILTERED="$REGION_ROWS"
+fi
+rm -f -- "$POLICY_JSON_FILE"
+if [[ "$POLICY_FILTERED" != "$REGION_ROWS" ]]; then
+  warn "An organization location policy (constraints/gcp.resourceLocations) applies; regions it forbids were removed from the list."
+  REGION_ROWS="$POLICY_FILTERED"
+fi
 REGIONS=()
 if [[ -n "$REGION_ROWS" ]]; then mapfile -t REGIONS <<<"$REGION_ROWS"; fi
 ((${#REGIONS[@]} > 0)) || fail "No region currently satisfies the availability checks (Cloud Run, Compute Engine UP, and ${MACHINE_TYPE} when a VM is needed) for this project."
@@ -1066,8 +1135,10 @@ if BUCKET_JSON="$(gcloud storage buckets describe "gs://${STATE_BUCKET}" --forma
   fi
 else
   info "Creating private Terraform state bucket gs://${STATE_BUCKET}"
-  gcloud storage buckets create "gs://${STATE_BUCKET}" --location="$REGION" --project="$PROJECT_ID" \
-    --uniform-bucket-level-access --public-access-prevention
+  if ! gcloud storage buckets create "gs://${STATE_BUCKET}" --location="$REGION" --project="$PROJECT_ID" \
+    --uniform-bucket-level-access --public-access-prevention; then
+    fail "Could not create the state bucket in ${REGION}. If the error mentions constraints/gcp.resourceLocations, this project only allows certain locations: re-run with --region set to an allowed one (see the project's location policy, or your lab instructions)."
+  fi
 fi
 gcloud storage buckets update "gs://${STATE_BUCKET}" --versioning --public-access-prevention \
   --uniform-bucket-level-access --project="$PROJECT_ID" >/dev/null
