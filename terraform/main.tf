@@ -21,6 +21,7 @@ resource "google_project_service" "required" {
     "cloudresourcemanager.googleapis.com",
     "storage.googleapis.com",
     "secretmanager.googleapis.com",
+    "cloudbilling.googleapis.com",
   ])
 
   project            = var.project_id

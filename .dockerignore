@@ -22,3 +22,11 @@ secrets/
 .ssh/
 *.tfvars
 *.tfvars.json
+*.tfplan
+*.tfstate
+*.tfstate.*
+/crash.log
+/coverage/
+/node_modules/
+**/__pycache__/
+*.py[cod]

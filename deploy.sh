@@ -13,6 +13,7 @@ fi
 PROTOCOL_CONFIG_FILE=""
 OPENVPN_SECRET_FILE=""
 OPENVPN_PKI_DIR=""
+TERRAFORM_PLAN_FILE=""
 
 info() { printf '%s==>%s %s\n' "$CYAN" "$RESET" "$*"; }
 success() { printf '%s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
@@ -52,9 +53,14 @@ run_with_spinner() {
   shift
   if [[ ! -t 1 || ! -t 2 || "${TERM:-}" == "dumb" || -n "${NO_COLOR:-}" ]]; then
     info "$label"
-    "$@"
-    success "$label"
-    return
+    if "$@"; then
+      success "$label"
+      return 0
+    else
+      status=$?
+      printf '%sERROR%s %s failed (exit %s).\n' "$RED" "$RESET" "$label" "$status" >&2
+      return "$status"
+    fi
   fi
 
   local -a frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
@@ -85,6 +91,7 @@ cleanup() {
   if [[ -n "$PROTOCOL_CONFIG_FILE" ]]; then rm -f -- "$PROTOCOL_CONFIG_FILE"; fi
   if [[ -n "$OPENVPN_SECRET_FILE" ]]; then rm -f -- "$OPENVPN_SECRET_FILE"; fi
   if [[ -n "$OPENVPN_PKI_DIR" ]]; then rm -rf -- "$OPENVPN_PKI_DIR"; fi
+  if [[ -n "$TERRAFORM_PLAN_FILE" ]]; then rm -f -- "$TERRAFORM_PLAN_FILE"; fi
 }
 trap cleanup EXIT
 
@@ -126,6 +133,34 @@ PROJECT_ID="$(gcloud config get-value project 2>/dev/null | tr -d '[:space:]')"
 [[ -n "$PROJECT_ID" && "$PROJECT_ID" != "(unset)" ]] || fail "No active project. Run 'gcloud config set project PROJECT_ID'."
 ACTIVE_ACCOUNT="$(gcloud config get-value account 2>/dev/null | tr -d '[:space:]')"
 [[ -n "$ACTIVE_ACCOUNT" && "$ACTIVE_ACCOUNT" != "(unset)" ]] || fail "No active gcloud account. Authenticate with gcloud."
+if ! gcloud auth print-access-token --account="$ACTIVE_ACCOUNT" >/dev/null 2>&1; then
+  fail "The active gcloud account cannot obtain an access token. Re-authenticate with 'gcloud auth login' and confirm this account has access to project ${PROJECT_ID}."
+fi
+
+if [[ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
+  [[ -r "$GOOGLE_APPLICATION_CREDENTIALS" ]] \
+    || fail "GOOGLE_APPLICATION_CREDENTIALS is set but unreadable: ${GOOGLE_APPLICATION_CREDENTIALS}"
+  if ! python3 - "$GOOGLE_APPLICATION_CREDENTIALS" <<'PY'
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as credentials_file:
+        credentials = json.load(credentials_file)
+except (OSError, ValueError):
+    raise SystemExit(1)
+if not isinstance(credentials, dict) or credentials.get("type") not in {
+    "service_account", "authorized_user", "external_account", "impersonated_service_account"
+}:
+    raise SystemExit(1)
+PY
+  then
+    fail "GOOGLE_APPLICATION_CREDENTIALS is not a valid Google ADC JSON credentials file."
+  fi
+elif ! gcloud auth application-default print-access-token >/dev/null 2>&1; then
+  fail "Terraform has no Application Default Credentials (ADC). Run 'gcloud auth application-default login' or set GOOGLE_APPLICATION_CREDENTIALS to a valid credential file. The gcloud login and Terraform ADC are separate."
+fi
 
 printf '\n%s\n' "xgcpx | GCP Gateway Deployment"
 printf 'Project: %s | Account: %s\n\n' "$PROJECT_ID" "$ACTIVE_ACCOUNT"
@@ -141,9 +176,22 @@ REQUIRED_APIS=(
   logging.googleapis.com
   storage.googleapis.com
   secretmanager.googleapis.com
+  cloudbilling.googleapis.com
 )
-run_with_spinner "Enable required APIs in ${PROJECT_ID}" \
-  gcloud services enable "${REQUIRED_APIS[@]}" --project="$PROJECT_ID" --quiet
+if ! run_with_spinner "Enable required APIs in ${PROJECT_ID}" \
+  gcloud services enable "${REQUIRED_APIS[@]}" --project="$PROJECT_ID" --quiet; then
+  fail "Required APIs could not be enabled. Grant serviceusage.services.enable (typically roles/serviceusage.serviceUsageAdmin) and check organization policy."
+fi
+
+PROJECT_STATUS="$(gcloud projects describe "$PROJECT_ID" --format='value(lifecycleState)' 2>/dev/null)" \
+  || fail "Cannot read project ${PROJECT_ID}. Check the project ID, gcloud account, and resourcemanager.projects.get permission."
+[[ "$PROJECT_STATUS" == "ACTIVE" ]] || fail "Project ${PROJECT_ID} is not ACTIVE (state: ${PROJECT_STATUS:-unknown})."
+
+if ! BILLING_STATUS="$(gcloud billing projects describe "$PROJECT_ID" --format='value(billingEnabled)' 2>/dev/null)"; then
+  fail "Cannot verify billing for ${PROJECT_ID}. Ensure Cloud Billing API is enabled and this account has billing.resourceAssociations.get permission."
+fi
+[[ "$BILLING_STATUS" == "True" || "$BILLING_STATUS" == "true" ]] \
+  || fail "Billing is not enabled for ${PROJECT_ID}. Link an active billing account before deploying Cloud Run, Compute Engine, load balancing, or Cloud Armor."
 
 if [[ -z "$REGION_HINT" ]]; then
   configured_region="$(gcloud config get-value compute/region 2>/dev/null || true)"
@@ -219,52 +267,122 @@ read -r -p "Service name [${DEFAULT_SERVICE}]: " SERVICE_NAME
 SERVICE_NAME="${SERVICE_NAME:-$DEFAULT_SERVICE}"
 [[ "$SERVICE_NAME" =~ ^[a-z]([-a-z0-9]{0,47}[a-z0-9])?$ ]] || fail "Invalid Cloud Run service name: $SERVICE_NAME"
 
+section "COMPUTE  |  Select the VM tier"
+printf '\n%s\n' "Compute tier:" "1) e2-micro" "2) e2-small" "3) e2-medium" "4) c2-standard-4" "5) c2d-highcpu-8"
+read -r -p "VM tier [1-5, default 2]: " TIER_CHOICE
+case "${TIER_CHOICE:-2}" in
+  1) MACHINE_TYPE="e2-micro" ;;
+  2) MACHINE_TYPE="e2-small" ;;
+  3) MACHINE_TYPE="e2-medium" ;;
+  4) MACHINE_TYPE="c2-standard-4" ;;
+  5) MACHINE_TYPE="c2d-highcpu-8" ;;
+  *) fail "Choose a compute tier from 1 to 5." ;;
+esac
+info "Selected VM machine type: ${MACHINE_TYPE}."
+if [[ "$MACHINE_TYPE" == "e2-micro" ]]; then
+  warn "e2-micro is a shared-core 2-vCPU, 1-GiB VM; it may qualify for Always Free only in eligible US regions and within current monthly limits."
+  warn "The protocol gateway is an additional VM. This stack also includes disks, load balancers, Cloud Armor, Cloud Run, and network egress that may incur charges."
+else
+  warn "${MACHINE_TYPE} is not an Always Free VM tier; check current GCP pricing and quotas before deployment."
+fi
+
 section "LOCATION  |  Select a Compute Engine region"
-info "Loading active Compute Engine regions for $PROJECT_ID"
-REGION_JSON="$(gcloud compute regions list --project="$PROJECT_ID" --filter='status=UP' --format=json)"
+info "Checking Cloud Run support, active Compute Engine regions, and ${MACHINE_TYPE} availability for ${PROJECT_ID}"
+if ! RUN_REGION_JSON="$(gcloud run regions list --project="$PROJECT_ID" --format=json)"; then
+  fail "Cannot query Cloud Run region support. Check run.locations.list permission, the Cloud Run API, and gcloud SDK version."
+fi
+if ! COMPUTE_REGION_JSON="$(gcloud compute regions list --project="$PROJECT_ID" --filter='status=UP' --format=json)"; then
+  fail "Cannot query active Compute Engine regions. Check compute.regions.list permission and the Compute Engine API."
+fi
+if ! MACHINE_TYPE_JSON="$(gcloud compute machine-types list --project="$PROJECT_ID" --filter="name=${MACHINE_TYPE}" --format=json)"; then
+  fail "Cannot query ${MACHINE_TYPE} availability. Check compute.machineTypes.list permission and the Compute Engine API."
+fi
 REGION_ROWS="$(python3 -c '
 import json
+import re
 import sys
-for region in json.load(sys.stdin):
-    name = region["name"]
-    print(name + "\t" + region.get("description", name))
-' <<<"$REGION_JSON")"
+run_regions, compute_regions, machine_types = map(json.loads, sys.argv[1:])
+def location_name(resource):
+    if isinstance(resource, str):
+        return resource.rsplit("/locations/", 1)[-1]
+    if not isinstance(resource, dict):
+        return ""
+    for key in ("locationId", "name", "uri"):
+        value = resource.get(key, "")
+        if "/locations/" in value:
+            return value.rsplit("/locations/", 1)[1]
+        if value and "/" not in value:
+            return value
+    return ""
+run_names = {location_name(item) for item in run_regions}
+compute_by_name = {
+    item.get("name", ""): item
+    for item in compute_regions
+    if item.get("status") == "UP"
+}
+machine_regions = set()
+for item in machine_types:
+    zone = item.get("zone") or item.get("selfLink", "")
+    match = re.search(r"/zones/([^/]+)", zone)
+    if match:
+        zone = match.group(1)
+    if zone:
+        machine_regions.add(zone.rsplit("-", 1)[0])
+for name in sorted(run_names & compute_by_name.keys() & machine_regions):
+    region = compute_by_name[name]
+    description = region.get("description") or name
+    print(name + "\t" + description)
+' "$RUN_REGION_JSON" "$COMPUTE_REGION_JSON" "$MACHINE_TYPE_JSON")" \
+  || fail "Unable to parse the live Cloud Run, Compute Engine, and machine-type region responses."
 REGIONS=()
 if [[ -n "$REGION_ROWS" ]]; then mapfile -t REGIONS <<<"$REGION_ROWS"; fi
-((${#REGIONS[@]} > 0)) || fail "No active Compute Engine regions were returned."
-warn "Region status does not guarantee machine-family quota, capacity, or Always Free eligibility."
+((${#REGIONS[@]} > 0)) || fail "No region currently satisfies all three checks: Cloud Run support, Compute Engine region status UP, and ${MACHINE_TYPE} listed for this project."
 region_flag() {
   case "$1" in
-    us-*) printf '🇺🇸 United States' ;;
-    northamerica-northeast*) printf '🇨🇦 Canada' ;;
-    northamerica-south*) printf '🇲🇽 Mexico' ;;
-    southamerica-east*) printf '🇧🇷 Brazil' ;;
-    southamerica-west*) printf '🇨🇱 Chile' ;;
+    us-central1*) printf '🇺🇸 Iowa, USA' ;;
+    us-east1*) printf '🇺🇸 South Carolina, USA' ;;
+    us-east4*) printf '🇺🇸 Northern Virginia, USA' ;;
+    us-east5*) printf '🇺🇸 Columbus, USA' ;;
+    us-south1*) printf '🇺🇸 Dallas, USA' ;;
+    us-west1*) printf '🇺🇸 Oregon, USA' ;;
+    us-west2*) printf '🇺🇸 Los Angeles, USA' ;;
+    us-west3*) printf '🇺🇸 Salt Lake City, USA' ;;
+    us-west4*) printf '🇺🇸 Las Vegas, USA' ;;
+    northamerica-northeast1*) printf '🇨🇦 Montreal, Canada' ;;
+    northamerica-northeast2*) printf '🇨🇦 Toronto, Canada' ;;
+    northamerica-south1*) printf '🇲🇽 Mexico' ;;
+    southamerica-east1*) printf '🇧🇷 Sao Paulo, Brazil' ;;
+    southamerica-west1*) printf '🇨🇱 Santiago, Chile' ;;
     europe-west1*) printf '🇧🇪 Belgium' ;;
-    europe-west2*) printf '🇬🇧 United Kingdom' ;;
-    europe-west3*) printf '🇩🇪 Germany' ;;
+    europe-west2*) printf '🇬🇧 London, UK' ;;
+    europe-west3*) printf '🇩🇪 Frankfurt, Germany' ;;
     europe-west4*) printf '🇳🇱 Netherlands' ;;
-    europe-west6*) printf '🇨🇭 Switzerland' ;;
-    europe-west8*|europe-west12*) printf '🇮🇹 Italy' ;;
-    europe-west9*) printf '🇫🇷 France' ;;
-    europe-west10*) printf '🇩🇪 Germany' ;;
+    europe-west6*) printf '🇨🇭 Zurich, Switzerland' ;;
+    europe-west8*) printf '🇮🇹 Milan, Italy' ;;
+    europe-west9*) printf '🇫🇷 Paris, France' ;;
+    europe-west10*) printf '🇩🇪 Berlin, Germany' ;;
+    europe-west12*) printf '🇮🇹 Turin, Italy' ;;
     europe-north1*) printf '🇫🇮 Finland' ;;
-    europe-north2*) printf '🇸🇪 Sweden' ;;
-    europe-central2*) printf '🇵🇱 Poland' ;;
-    europe-southwest1*) printf '🇪🇸 Spain' ;;
+    europe-north2*) printf '🇸🇪 Stockholm, Sweden' ;;
+    europe-central2*) printf '🇵🇱 Warsaw, Poland' ;;
+    europe-southwest1*) printf '🇪🇸 Madrid, Spain' ;;
     asia-east1*) printf '🇹🇼 Taiwan' ;;
     asia-east2*) printf '🇭🇰 Hong Kong' ;;
-    asia-northeast1*|asia-northeast2*) printf '🇯🇵 Japan' ;;
-    asia-northeast3*) printf '🇰🇷 South Korea' ;;
-    asia-south1*|asia-south2*|asia-south3*) printf '🇮🇳 India' ;;
+    asia-northeast1*) printf '🇯🇵 Tokyo, Japan' ;;
+    asia-northeast2*) printf '🇯🇵 Osaka, Japan' ;;
+    asia-northeast3*) printf '🇰🇷 Seoul, South Korea' ;;
+    asia-south1*) printf '🇮🇳 Mumbai, India' ;;
+    asia-south2*) printf '🇮🇳 Delhi, India' ;;
+    asia-south3*) printf '🇮🇳 India' ;;
     asia-southeast1*) printf '🇸🇬 Singapore' ;;
-    asia-southeast2*) printf '🇮🇩 Indonesia' ;;
-    asia-southeast3*) printf '🇹🇭 Thailand' ;;
-    australia-southeast*) printf '🇦🇺 Australia' ;;
-    me-central1*) printf '🇶🇦 Qatar' ;;
-    me-central2*) printf '🇸🇦 Saudi Arabia' ;;
-    me-west1*) printf '🇮🇱 Israel' ;;
-    africa-south1*) printf '🇿🇦 South Africa' ;;
+    asia-southeast2*) printf '🇮🇩 Jakarta, Indonesia' ;;
+    asia-southeast3*) printf '🇹🇭 Bangkok, Thailand' ;;
+    australia-southeast1*) printf '🇦🇺 Sydney, Australia' ;;
+    australia-southeast2*) printf '🇦🇺 Melbourne, Australia' ;;
+    me-central1*) printf '🇶🇦 Doha, Qatar' ;;
+    me-central2*) printf '🇸🇦 Dammam, Saudi Arabia' ;;
+    me-west1*) printf '🇮🇱 Tel Aviv, Israel' ;;
+    africa-south1*) printf '🇿🇦 Johannesburg, South Africa' ;;
     *) printf '🌐 %s' "$2" ;;
   esac
 }
@@ -284,7 +402,7 @@ if [[ -n "$REGION_HINT" ]]; then
   if [[ -n "$REGION" ]]; then
     info "Auto-selected ${REGION} from ${REGION_HINT_SOURCE} ($(region_flag "$REGION" "$REGION"))."
   elif [[ "$REGION_HINT_SOURCE" == "--region" || "$REGION_HINT_SOURCE" == "environment" ]]; then
-    fail "Configured region '${REGION_HINT}' is not an active region in project ${PROJECT_ID}."
+    fail "Configured region '${REGION_HINT}' is not in the live Cloud Run + Compute + ${MACHINE_TYPE} availability set for project ${PROJECT_ID}."
   else
     warn "Configured gcloud region '${REGION_HINT}' is not active; choose an available region below."
   fi
@@ -309,24 +427,73 @@ if [[ -z "$REGION" ]]; then
   fi
 fi
 
-section "COMPUTE  |  Select the VM tier"
-printf '\n%s\n' "Compute tier:" "1) e2-micro" "2) e2-small" "3) e2-medium" "4) c2-standard-4" "5) c2d-highcpu-8"
-read -r -p "VM tier [1-5, default 2]: " TIER_CHOICE
-case "${TIER_CHOICE:-2}" in
-  1) MACHINE_TYPE="e2-micro" ;;
-  2) MACHINE_TYPE="e2-small" ;;
-  3) MACHINE_TYPE="e2-medium" ;;
-  4) MACHINE_TYPE="c2-standard-4" ;;
-  5) MACHINE_TYPE="c2d-highcpu-8" ;;
-  *) fail "Choose a compute tier from 1 to 5." ;;
+case "$MACHINE_TYPE" in
+  e2-*) VCPU_COUNT=2; FAMILY_CPU_QUOTA="E2_CPUS" ;;
+  c2-standard-4) VCPU_COUNT=4; FAMILY_CPU_QUOTA="C2_CPUS" ;;
+  c2d-highcpu-8) VCPU_COUNT=8; FAMILY_CPU_QUOTA="C2D_CPUS" ;;
 esac
-info "Selected VM machine type: ${MACHINE_TYPE}."
-if [[ "$MACHINE_TYPE" == "e2-micro" ]]; then
-  warn "e2-micro is a shared-core 2-vCPU, 1-GiB VM; it may qualify for Always Free only in eligible US regions and within current monthly limits."
-  warn "The protocol gateway is an additional VM. This stack also includes disks, load balancers, Cloud Armor, Cloud Run, and network egress that may incur charges."
-else
-  warn "${MACHINE_TYPE} is not an Always Free VM tier; check current GCP pricing and quotas before deployment."
+MINIMUM_VCPU_QUOTA=$((VCPU_COUNT * 2))
+RECOMMENDED_VCPU_QUOTA=$((VCPU_COUNT * 4))
+if ! REGION_QUOTA_JSON="$(gcloud compute regions describe "$REGION" --project="$PROJECT_ID" --format=json)"; then
+  fail "Cannot inspect regional quotas for ${REGION}. Check compute.regions.get permission."
 fi
+QUOTA_REPORT=""
+quota_status=0
+if QUOTA_REPORT="$(python3 - "$REGION_QUOTA_JSON" "$FAMILY_CPU_QUOTA" "$MINIMUM_VCPU_QUOTA" "$RECOMMENDED_VCPU_QUOTA" <<'PY'
+import json
+import sys
+
+region = json.loads(sys.argv[1])
+family_metric = sys.argv[2]
+minimum = float(sys.argv[3])
+recommended = float(sys.argv[4])
+quotas = {item["metric"]: item for item in region.get("quotas", [])}
+metrics = [metric for metric in (family_metric, "CPUS") if metric in quotas]
+if not metrics:
+    print("UNKNOWN\tNo family-specific or aggregate CPU quota was returned.")
+    raise SystemExit(0)
+insufficient = False
+below_recommended = False
+for metric in metrics:
+    quota = quotas[metric]
+    limit = float(quota.get("limit", 0))
+    usage = float(quota.get("usage", 0))
+    available = max(0, limit - usage)
+    print(f"{metric}\t{available:g}\t{limit:g}\t{usage:g}")
+    insufficient |= available < minimum
+    below_recommended |= available < recommended
+if insufficient:
+    raise SystemExit(2)
+if below_recommended:
+    raise SystemExit(3)
+PY
+)"; then
+  quota_status=0
+else
+  quota_status=$?
+fi
+if ((quota_status == 0)); then
+  while IFS=$'\t' read -r metric available limit usage; do
+    if [[ "$metric" == "UNKNOWN" ]]; then
+      warn "Regional CPU quota was not returned by the API; Terraform plan is still required to confirm account eligibility."
+    else
+      info "Regional quota ${metric}: ${available} CPU(s) free of ${limit} (${usage} in use)."
+    fi
+  done <<<"$QUOTA_REPORT"
+else
+  if ((quota_status == 2)); then
+    printf '%s\n' "$QUOTA_REPORT" >&2
+    fail "Current ${REGION} CPU quota is below the ${MINIMUM_VCPU_QUOTA} vCPU minimum for the gateway and protocol VMs. Request quota in Cloud Console or choose a smaller eligible tier."
+  elif ((quota_status == 3)); then
+    while IFS=$'\t' read -r metric available limit usage; do
+      info "Regional quota ${metric}: ${available} CPU(s) free of ${limit} (${usage} in use)."
+    done <<<"$QUOTA_REPORT"
+    warn "Quota supports the initial two VMs but not the ${RECOMMENDED_VCPU_QUOTA} vCPU recommended for full gateway autoscaling."
+  else
+    fail "Unable to evaluate regional CPU quotas (status ${quota_status})."
+  fi
+fi
+info "Quota check covers the initial two VMs; it cannot guarantee future zonal capacity or organization-policy approval."
 
 section "APPLICATION  |  Configure the HTTPS hostname and upstream"
 read -r -p "Hostname for managed HTTPS certificate (e.g. api.example.com): " DOMAIN
@@ -673,10 +840,21 @@ for cidr in "${TCP_RANGES[@]}"; do TCP_JSON+="\"${cidr}\","; done
 TCP_JSON="${TCP_JSON%,}]"
 export TF_VAR_tcp_source_ranges="$TCP_JSON"
 
-run_with_spinner "Initializing Terraform" terraform -chdir=terraform init -input=false \
-  -backend-config="bucket=${STATE_BUCKET}" -backend-config="prefix=${APP_NAME}/terraform"
-run_with_spinner "Deploying Cloud Run, gateway VM, protocol VM, HTTPS load balancer, and Cloud Armor" \
-  terraform -chdir=terraform apply -input=false -auto-approve
+if ! run_with_spinner "Initializing Terraform state and provider" terraform -chdir=terraform init -input=false \
+  -backend-config="bucket=${STATE_BUCKET}" -backend-config="prefix=${APP_NAME}/terraform"; then
+  fail "Terraform init failed. Ensure its ADC principal can read and write gs://${STATE_BUCKET}, and verify provider/network access."
+fi
+TERRAFORM_PLAN_FILE="$(mktemp "${TMPDIR:-/tmp}/xgcpx-terraform-plan.XXXXXX")"
+if ! run_with_spinner "Checking Terraform credentials, permissions, quotas, and planned changes" \
+  terraform -chdir=terraform plan -input=false -out="$TERRAFORM_PLAN_FILE"; then
+  fail "Terraform plan failed; no Terraform infrastructure changes were applied. Check the ADC principal, project IAM roles, quota, billing, and organization policies shown above."
+fi
+if ! run_with_spinner "Applying the verified Terraform plan" \
+  terraform -chdir=terraform apply -input=false "$TERRAFORM_PLAN_FILE"; then
+  fail "Terraform apply failed. Review the provider error above; GCP may have accepted only part of the deployment."
+fi
+rm -f -- "$TERRAFORM_PLAN_FILE"
+TERRAFORM_PLAN_FILE=""
 
 LB_IP="$(terraform -chdir=terraform output -raw load_balancer_ip)"
 section "COMPLETE  |  Deployment outputs"
