@@ -14,6 +14,8 @@ locals {
   vm_boot_disk_type           = var.machine_type == "e2-micro" ? "pd-standard" : "pd-balanced"
   vm_boot_disk_size           = var.machine_type == "e2-micro" ? 15 : 20
   enable_tcp_proxy            = var.enable_tcp_proxy && length(var.tcp_source_ranges) > 0
+  use_lb                      = !var.use_cloud_run_host
+  create_gateway_vm           = local.use_lb || local.enable_tcp_proxy
   common_labels = {
     application = "xgcpx"
     managed_by  = "terraform"
@@ -44,11 +46,16 @@ resource "google_project_service" "required" {
 resource "google_cloud_run_v2_service" "gateway" {
   name                = var.service_name
   location            = var.region
-  ingress             = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  ingress             = local.use_lb ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" : "INGRESS_TRAFFIC_ALL"
   deletion_protection = true
   labels              = local.common_labels
 
   lifecycle {
+    precondition {
+      condition     = var.use_cloud_run_host || var.domain != ""
+      error_message = "domain is required unless use_cloud_run_host is true."
+    }
+
     precondition {
       condition     = var.backend_image != ""
       error_message = "The Cloud Run gateway requires the built-in backend sidecar image."
@@ -209,23 +216,27 @@ resource "google_compute_subnetwork" "gateway" {
 }
 
 resource "google_service_account" "gateway_vm" {
+  count = local.create_gateway_vm ? 1 : 0
   account_id   = "${local.prefix}-vm"
   display_name = "xgcpx persistent gateway VM"
 }
 
 resource "google_project_iam_member" "vm_artifact_reader" {
+  count = local.create_gateway_vm ? 1 : 0
   project = var.project_id
   role    = "roles/artifactregistry.reader"
-  member  = "serviceAccount:${google_service_account.gateway_vm.email}"
+  member  = "serviceAccount:${google_service_account.gateway_vm[0].email}"
 }
 
 resource "google_project_iam_member" "vm_log_writer" {
+  count = local.create_gateway_vm ? 1 : 0
   project = var.project_id
   role    = "roles/logging.logWriter"
-  member  = "serviceAccount:${google_service_account.gateway_vm.email}"
+  member  = "serviceAccount:${google_service_account.gateway_vm[0].email}"
 }
 
 resource "google_compute_instance_template" "gateway" {
+  count = local.create_gateway_vm ? 1 : 0
   name_prefix  = "${local.prefix}-vm-"
   machine_type = var.machine_type
   tags         = ["${local.prefix}-gateway"]
@@ -245,7 +256,7 @@ resource "google_compute_instance_template" "gateway" {
   }
 
   service_account {
-    email  = google_service_account.gateway_vm.email
+    email  = google_service_account.gateway_vm[0].email
     scopes = ["https://www.googleapis.com/auth/cloud-platform"]
   }
 
@@ -425,13 +436,14 @@ resource "google_compute_firewall" "protocol_public" {
 }
 
 resource "google_compute_region_instance_group_manager" "gateway" {
+  count = local.create_gateway_vm ? 1 : 0
   name               = "${local.prefix}-mig"
   region             = var.region
   base_instance_name = "${local.prefix}-vm"
   target_size        = 1
 
   version {
-    instance_template = google_compute_instance_template.gateway.id
+    instance_template = google_compute_instance_template.gateway[0].id
   }
 
   named_port {
@@ -448,7 +460,7 @@ resource "google_compute_region_instance_group_manager" "gateway" {
   }
 
   auto_healing_policies {
-    health_check      = google_compute_health_check.vm.id
+    health_check      = google_compute_health_check.vm[0].id
     initial_delay_sec = 180
   }
 
@@ -458,9 +470,10 @@ resource "google_compute_region_instance_group_manager" "gateway" {
 }
 
 resource "google_compute_region_autoscaler" "gateway" {
+  count = local.create_gateway_vm ? 1 : 0
   name   = "${local.prefix}-autoscaler"
   region = var.region
-  target = google_compute_region_instance_group_manager.gateway.id
+  target = google_compute_region_instance_group_manager.gateway[0].id
 
   autoscaling_policy {
     min_replicas    = 1
@@ -474,6 +487,7 @@ resource "google_compute_region_autoscaler" "gateway" {
 }
 
 resource "google_compute_firewall" "lb_to_vm" {
+  count = local.create_gateway_vm ? 1 : 0
   name          = "${local.prefix}-allow-lb-health-checks"
   network       = google_compute_network.gateway.name
   direction     = "INGRESS"
@@ -515,6 +529,7 @@ resource "google_compute_firewall" "tcp_health_checks" {
 }
 
 resource "google_compute_health_check" "vm" {
+  count = local.create_gateway_vm ? 1 : 0
   name                = "${local.prefix}-vm-hc"
   check_interval_sec  = 10
   timeout_sec         = 5
@@ -574,7 +589,7 @@ resource "google_compute_region_backend_service" "tcp_proxy" {
   health_checks         = [google_compute_region_health_check.tcp_proxy[0].id]
   port_name             = "tcp"
   backend {
-    group          = google_compute_region_instance_group_manager.gateway.instance_group
+    group          = google_compute_region_instance_group_manager.gateway[0].instance_group
     balancing_mode = "CONNECTION"
   }
 }
@@ -588,7 +603,7 @@ resource "google_compute_region_backend_service" "tls_proxy" {
   health_checks         = [google_compute_region_health_check.tls_proxy[0].id]
   port_name             = "tls"
   backend {
-    group          = google_compute_region_instance_group_manager.gateway.instance_group
+    group          = google_compute_region_instance_group_manager.gateway[0].instance_group
     balancing_mode = "CONNECTION"
   }
 }
@@ -618,6 +633,7 @@ resource "google_compute_forwarding_rule" "tls_proxy" {
 }
 
 resource "google_compute_security_policy" "edge" {
+  count = local.use_lb ? 1 : 0
   name        = "${local.prefix}-edge-policy"
   description = "xgcpx WAF, source filtering, and per-client rate controls"
   type        = "CLOUD_ARMOR"
@@ -690,10 +706,12 @@ resource "google_compute_security_policy" "edge" {
 }
 
 resource "google_compute_global_address" "edge" {
+  count = local.use_lb ? 1 : 0
   name = "${local.prefix}-global-ip"
 }
 
 resource "google_compute_managed_ssl_certificate" "edge" {
+  count = local.use_lb ? 1 : 0
   name = "${local.prefix}-managed-cert"
   managed {
     domains = [var.domain]
@@ -701,6 +719,7 @@ resource "google_compute_managed_ssl_certificate" "edge" {
 }
 
 resource "google_compute_region_network_endpoint_group" "cloud_run" {
+  count = local.use_lb ? 1 : 0
   name                  = "${local.prefix}-run-neg"
   region                = var.region
   network_endpoint_type = "SERVERLESS"
@@ -708,33 +727,36 @@ resource "google_compute_region_network_endpoint_group" "cloud_run" {
 }
 
 resource "google_compute_backend_service" "cloud_run" {
+  count = local.use_lb ? 1 : 0
   name                  = "${local.prefix}-run-backend"
   protocol              = "HTTP"
   load_balancing_scheme = "EXTERNAL_MANAGED"
   # Match Cloud Run's 3600-second request limit so long-lived HTTP streams are not cut short at the edge.
   timeout_sec     = 3600
   enable_cdn      = true
-  security_policy = google_compute_security_policy.edge.id
-  backend { group = google_compute_region_network_endpoint_group.cloud_run.id }
+  security_policy = google_compute_security_policy.edge[0].id
+  backend { group = google_compute_region_network_endpoint_group.cloud_run[0].id }
 }
 
 resource "google_compute_backend_service" "vm" {
+  count = local.use_lb ? 1 : 0
   name                  = "${local.prefix}-vm-backend"
   protocol              = "HTTP"
   load_balancing_scheme = "EXTERNAL_MANAGED"
   timeout_sec           = 3600
-  security_policy       = google_compute_security_policy.edge.id
-  health_checks         = [google_compute_health_check.vm.id]
+  security_policy       = google_compute_security_policy.edge[0].id
+  health_checks         = [google_compute_health_check.vm[0].id]
   backend {
-    group           = google_compute_region_instance_group_manager.gateway.instance_group
+    group           = google_compute_region_instance_group_manager.gateway[0].instance_group
     balancing_mode  = "UTILIZATION"
     max_utilization = 0.8
   }
 }
 
 resource "google_compute_url_map" "https" {
+  count = local.use_lb ? 1 : 0
   name            = "${local.prefix}-https-map"
-  default_service = google_compute_backend_service.cloud_run.id
+  default_service = google_compute_backend_service.cloud_run[0].id
 
   host_rule {
     hosts        = [var.domain]
@@ -742,32 +764,35 @@ resource "google_compute_url_map" "https" {
   }
   path_matcher {
     name            = "gateway-routes"
-    default_service = google_compute_backend_service.cloud_run.id
+    default_service = google_compute_backend_service.cloud_run[0].id
     dynamic "path_rule" {
       for_each = var.upstream_primary == local.builtin_backend ? [] : [1]
       content {
         paths   = ["/persistent/*"]
-        service = google_compute_backend_service.vm.id
+        service = google_compute_backend_service.vm[0].id
       }
     }
   }
 }
 
 resource "google_compute_target_https_proxy" "https" {
+  count = local.use_lb ? 1 : 0
   name             = "${local.prefix}-https-proxy"
-  url_map          = google_compute_url_map.https.id
-  ssl_certificates = [google_compute_managed_ssl_certificate.edge.id]
+  url_map          = google_compute_url_map.https[0].id
+  ssl_certificates = [google_compute_managed_ssl_certificate.edge[0].id]
 }
 
 resource "google_compute_global_forwarding_rule" "https" {
+  count = local.use_lb ? 1 : 0
   name                  = "${local.prefix}-https-forwarding"
-  ip_address            = google_compute_global_address.edge.address
-  target                = google_compute_target_https_proxy.https.id
+  ip_address            = google_compute_global_address.edge[0].address
+  target                = google_compute_target_https_proxy.https[0].id
   port_range            = "443"
   load_balancing_scheme = "EXTERNAL_MANAGED"
 }
 
 resource "google_compute_url_map" "http_redirect" {
+  count = local.use_lb ? 1 : 0
   name = "${local.prefix}-http-redirect"
   default_url_redirect {
     https_redirect         = true
@@ -777,14 +802,16 @@ resource "google_compute_url_map" "http_redirect" {
 }
 
 resource "google_compute_target_http_proxy" "http_redirect" {
+  count = local.use_lb ? 1 : 0
   name    = "${local.prefix}-http-proxy"
-  url_map = google_compute_url_map.http_redirect.id
+  url_map = google_compute_url_map.http_redirect[0].id
 }
 
 resource "google_compute_global_forwarding_rule" "http_redirect" {
+  count = local.use_lb ? 1 : 0
   name                  = "${local.prefix}-http-forwarding"
-  ip_address            = google_compute_global_address.edge.address
-  target                = google_compute_target_http_proxy.http_redirect.id
+  ip_address            = google_compute_global_address.edge[0].address
+  target                = google_compute_target_http_proxy.http_redirect[0].id
   port_range            = "80"
   load_balancing_scheme = "EXTERNAL_MANAGED"
 }
