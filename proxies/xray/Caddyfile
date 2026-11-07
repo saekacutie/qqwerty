@@ -33,13 +33,25 @@ http://{$RELAY_DOMAIN} {
 		reverse_proxy @ssh_ws 127.0.0.1:10009
 
 		@xhttp_packet path /xhttp-packet*
-		reverse_proxy @xhttp_packet 127.0.0.1:10004
+		reverse_proxy @xhttp_packet 127.0.0.1:10004 {
+			transport http {
+				versions 2 h2c
+			}
+		}
 
 		@xhttp_chunked path /xhttp-chunked*
-		reverse_proxy @xhttp_chunked 127.0.0.1:10005
+		reverse_proxy @xhttp_chunked 127.0.0.1:10005 {
+			transport http {
+				versions 2 h2c
+			}
+		}
 
 		@xhttp_request_response path /xhttp-request-response*
-		reverse_proxy @xhttp_request_response 127.0.0.1:10006
+		reverse_proxy @xhttp_request_response 127.0.0.1:10006 {
+			transport http {
+				versions 2 h2c
+			}
+		}
 
 		handle {
 			respond "not found" 404
@@ -50,11 +62,23 @@ http://{$RELAY_DOMAIN} {
 https://{$RELAY_DOMAIN}:8081 {
 	route {
 		@xhttp_packet path /xhttp-packet*
-		reverse_proxy @xhttp_packet 127.0.0.1:10004
+		reverse_proxy @xhttp_packet 127.0.0.1:10004 {
+			transport http {
+				versions 2 h2c
+			}
+		}
 		@xhttp_chunked path /xhttp-chunked*
-		reverse_proxy @xhttp_chunked 127.0.0.1:10005
+		reverse_proxy @xhttp_chunked 127.0.0.1:10005 {
+			transport http {
+				versions 2 h2c
+			}
+		}
 		@xhttp_request_response path /xhttp-request-response*
-		reverse_proxy @xhttp_request_response 127.0.0.1:10006
+		reverse_proxy @xhttp_request_response 127.0.0.1:10006 {
+			transport http {
+				versions 2 h2c
+			}
+		}
 		handle {
 			respond "not found" 404
 		}

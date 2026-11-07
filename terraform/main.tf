@@ -754,6 +754,11 @@ resource "google_compute_backend_service" "cloud_run" {
   # Only cache what the origin explicitly marks cacheable; tunnelled proxy traffic is never cached.
   cdn_policy {
     cache_mode = "USE_ORIGIN_HEADERS"
+    cache_key_policy {
+      include_host         = true
+      include_protocol     = true
+      include_query_string = true
+    }
   }
 
   backend { group = google_compute_region_network_endpoint_group.cloud_run[0].id }
