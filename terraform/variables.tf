@@ -14,8 +14,8 @@ variable "service_name" {
   default     = "api-gateway-404"
 
   validation {
-    condition     = can(regex("^[a-z]([-a-z0-9]{0,47}[a-z0-9])?$", var.service_name))
-    error_message = "service_name must be a valid lowercase Cloud Run service name."
+    condition     = can(regex("^[a-z]([-a-z0-9]{1,47}[a-z0-9])$", var.service_name))
+    error_message = "service_name must be 3-49 characters: a lowercase Cloud Run service name."
   }
 }
 
@@ -29,8 +29,25 @@ variable "backend_image" {
   type        = string
 }
 
+variable "deletion_protection" {
+  description = "Protect the Cloud Run service from accidental deletion. Disabled by default so re-deploys and 'terraform destroy' work."
+  type        = bool
+  default     = false
+}
+
+variable "min_instance_count" {
+  description = "Minimum warm Cloud Run instances (0 = scale to zero, cheapest; 1 = no cold starts)."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.min_instance_count >= 0 && var.min_instance_count <= 10 && floor(var.min_instance_count) == var.min_instance_count
+    error_message = "min_instance_count must be an integer between 0 and 10."
+  }
+}
+
 variable "enable_protocol_gateway" {
-  description = "Create the protocol VM for hybrid runtime or VM-only OpenVPN in Cloud Run runtime."
+  description = "Create the protocol VM (Xray on the VM, or OpenVPN-only VM when Xray runs in Cloud Run)."
   type        = bool
   default     = false
 }
@@ -53,13 +70,13 @@ variable "enable_cloudrun_protocols" {
 }
 
 variable "protocol_image" {
-  description = "Caddy, Xray, and optional SSH image for the protocol VM or Cloud Run sidecar."
+  description = "Caddy, Xray, and optional SSH image for the protocol VM or Cloud Run sidecar. Empty when no Xray transport is selected."
   type        = string
   default     = ""
 }
 
 variable "protocol_domain" {
-  description = "DNS hostname pointed at the dedicated protocol VM IP."
+  description = "DNS hostname pointed at the protocol VM IP. Empty = <vm-ip>.sslip.io is derived automatically."
   type        = string
   default     = ""
 
@@ -67,6 +84,12 @@ variable "protocol_domain" {
     condition     = var.protocol_domain == "" || can(regex("^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,}$", var.protocol_domain))
     error_message = "protocol_domain must be a fully qualified DNS hostname."
   }
+}
+
+variable "protocol_zone" {
+  description = "Zone for the protocol VM (chosen by deploy.sh from zones that list the machine type). Empty = first UP zone of the region."
+  type        = string
+  default     = ""
 }
 
 variable "protocol_secret_name" {
@@ -121,7 +144,7 @@ variable "protocol_udp_ports" {
 }
 
 variable "enable_openvpn" {
-  description = "Run a certificate-authenticated OpenVPN UDP service on the protocol VM."
+  description = "Run a certificate-authenticated OpenVPN UDP service on the protocol VM. Only when explicitly requested."
   type        = bool
   default     = false
 }
@@ -150,7 +173,7 @@ variable "openvpn_secret_version" {
 }
 
 variable "machine_type" {
-  description = "Compute Engine machine family selected for the persistent tier."
+  description = "Compute Engine machine type for the persistent tier."
   type        = string
   default     = "e2-small"
 
@@ -167,7 +190,7 @@ variable "use_cloud_run_host" {
 }
 
 variable "domain" {
-  description = "Public hostname. With use_cloud_run_host this is the predicted or actual run.app host and no certificate is created for it."
+  description = "Public hostname. With use_cloud_run_host this is the predicted run.app host and no certificate is created for it."
   type        = string
   default     = ""
 
@@ -260,10 +283,16 @@ variable "tls_upstream_host" {
   }
 }
 
+variable "enable_waf" {
+  description = "Apply Cloud Armor preconfigured SQLi/XSS WAF rules. These inspect request bodies and can false-positive on tunnelled proxy traffic."
+  type        = bool
+  default     = true
+}
+
 variable "requests_per_minute" {
-  description = "Cloud Armor per-client request threshold before temporary banning."
+  description = "Cloud Armor per-client request threshold before temporary banning. xHTTP packet-up opens many short requests, so keep this generous."
   type        = number
-  default     = 600
+  default     = 1800
 
   validation {
     condition     = var.requests_per_minute >= 1 && var.requests_per_minute <= 100000 && floor(var.requests_per_minute) == var.requests_per_minute

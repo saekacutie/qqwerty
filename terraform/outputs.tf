@@ -1,11 +1,11 @@
 output "load_balancer_ip" {
-  description = "Global external load balancer IPv4 address."
-  value       = google_compute_global_address.edge.address
+  description = "Global external load balancer IPv4 address; null in automatic Cloud Run host mode."
+  value       = try(google_compute_global_address.edge[0].address, null)
 }
 
 output "https_url" {
-  description = "Public HTTPS endpoint. Certificate activation requires DNS to point at load_balancer_ip."
-  value       = "https://${var.domain}"
+  description = "Public HTTPS endpoint. The real run.app URL in automatic mode; otherwise your domain (certificate activation requires DNS to point at load_balancer_ip)."
+  value       = var.use_cloud_run_host ? google_cloud_run_v2_service.gateway.uri : "https://${var.domain}"
 }
 
 output "cloud_run_service" {
@@ -14,8 +14,8 @@ output "cloud_run_service" {
 }
 
 output "vm_managed_group" {
-  description = "Regional persistent Compute Engine managed instance group."
-  value       = google_compute_region_instance_group_manager.gateway.name
+  description = "Regional gateway managed instance group; null when no gateway VM exists."
+  value       = try(google_compute_region_instance_group_manager.gateway[0].name, null)
 }
 
 output "tcp_proxy_ip" {
@@ -29,6 +29,6 @@ output "tls_proxy_ip" {
 }
 
 output "protocol_gateway_ip" {
-  description = "Dedicated public IP for the authenticated protocol VM; null when it is disabled."
+  description = "Dedicated public IP for the protocol VM; null when it is disabled."
   value       = try(google_compute_address.protocol_vm[0].address, null)
 }
