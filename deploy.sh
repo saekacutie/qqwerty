@@ -21,13 +21,24 @@ COMPUTE_REGION_JSON_FILE=""
 MACHINE_TYPE_JSON_FILE=""
 
 info() { printf '%s==>%s %s\n' "$CYAN" "$RESET" "$*"; }
-success() { printf '%s✓%s %s\n' "$GREEN" "$RESET" "$*"; }
+success() { printf '%s[OK]%s %s\n' "$GREEN" "$RESET" "$*"; }
 warn() { printf '%s!%s %s\n' "$YELLOW" "$RESET" "$*"; }
-fail() { printf '%s✗ ERROR%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+fail() { printf '%s[X] ERROR%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
 section() {
-  printf '\n%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$BLUE" "$RESET"
+  printf '\n%s============================================================%s\n' "$BLUE" "$RESET"
   printf '%s%s %s%s\n' "$BOLD" "$BLUE" "$*" "$RESET"
-  printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$BLUE" "$RESET"
+  printf '%s============================================================%s\n' "$BLUE" "$RESET"
+}
+# Answer a prompt from an environment variable, an interactive read, or (no terminal) an empty value.
+prompt_value() {
+  local __var="$1" __env="$2" __prompt="$3" __val=""
+  if [[ -n "$__env" ]]; then
+    __val="$__env"
+    info "${__prompt%%[:\[]*}: ${__val} (from environment)"
+  elif [[ -t 0 ]]; then
+    read -r -p "$__prompt" __val || __val=""
+  fi
+  printf -v "$__var" '%s' "$__val"
 }
 validate_https_upstream() {
   python3 - "$1" <<'PY'
@@ -68,14 +79,14 @@ run_with_spinner() {
     fi
   fi
 
-  local -a frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local -a frames=('|' '/' '-' '\\')
   output_file="$(mktemp)"
   "$@" >"$output_file" 2>&1 &
   local command_pid=$!
   while jobs -pr | grep -Fxq "$command_pid"; do
     printf '\r%s%s%s %s' "$CYAN" "${frames[$frame]}" "$RESET" "$label"
     frame=$(((frame + 1) % ${#frames[@]}))
-    sleep 0.12
+    sleep 0.15
   done
   wait "$command_pid" || status=$?
   printf '\r\033[K'
@@ -106,8 +117,24 @@ trap cleanup EXIT
 REGION_HINT="${XGCPX_REGION:-${CLOUDSDK_COMPUTE_REGION:-}}"
 REGION_HINT_SOURCE="environment"
 CLI_REGION=""
+CLI_PROJECT=""
+ASSUME_YES="${XGCPX_ASSUME_YES:-false}"
 while (($# > 0)); do
   case "$1" in
+    --project)
+      (($# >= 2)) || fail "--project requires a project ID."
+      CLI_PROJECT="$2"
+      shift 2
+      ;;
+    --project=*)
+      CLI_PROJECT="${1#--project=}"
+      [[ -n "$CLI_PROJECT" ]] || fail "--project requires a project ID."
+      shift
+      ;;
+    --yes|-y)
+      ASSUME_YES=true
+      shift
+      ;;
     --region)
       (($# >= 2)) || fail "--region requires a region name."
       CLI_REGION="$2"
@@ -119,8 +146,16 @@ while (($# > 0)); do
       shift
       ;;
     --help|-h)
-      printf 'Usage: %s [--region REGION]\n' "$0"
+      printf 'Usage: %s [--project PROJECT_ID] [--region REGION] [--yes]\n' "$0"
+      printf 'Project precedence: --project, XGCPX_PROJECT, STUDENT_PROJECT_ID, gcloud core/project.\n'
+      printf 'Refuses to run in MAIN_PROJECT_ID or XGCPX_FORBIDDEN_PROJECT.\n'
       printf 'Region precedence: --region, XGCPX_REGION, CLOUDSDK_COMPUTE_REGION, gcloud compute/region.\n'
+      printf 'Non-interactive answers (environment variables):\n'
+      printf '  XGCPX_GATEWAY (envoy|nginx|caddy|traefik|unified or 1-5), XGCPX_PROTOCOL_RUNTIME (vm|cloud-run),\n'
+      printf '  XGCPX_PROTOCOLS (1-8, comma list, or all), XGCPX_SERVICE, XGCPX_TIER (machine type or 1-5),\n'
+      printf '  XGCPX_DOMAIN (blank = automatic Cloud Run host), XGCPX_RELAY_DOMAIN (protocol VM hostname),\n'
+      printf '  XGCPX_UPSTREAM, XGCPX_UPSTREAM_FALLBACK, XGCPX_BLOCKED_CIDRS, XGCPX_ALLOWED_CIDRS,\n'
+      printf '  XGCPX_TCP_UPSTREAM, XGCPX_TLS_UPSTREAM, XGCPX_TCP_SOURCE_RANGES, XGCPX_ASSUME_YES=true.\n'
       exit 0
       ;;
     *)
@@ -137,8 +172,29 @@ for tool in gcloud docker terraform python3; do
   command -v "$tool" >/dev/null 2>&1 || fail "Required tool not found: $tool"
 done
 
-PROJECT_ID="$(gcloud config get-value project 2>/dev/null | tr -d '[:space:]')"
-[[ -n "$PROJECT_ID" && "$PROJECT_ID" != "(unset)" ]] || fail "No active project. Run 'gcloud config set project PROJECT_ID'."
+PROJECT_ID=""
+PROJECT_SOURCE=""
+if [[ -n "$CLI_PROJECT" ]]; then
+  PROJECT_ID="$CLI_PROJECT"; PROJECT_SOURCE="--project"
+elif [[ -n "${XGCPX_PROJECT:-}" ]]; then
+  PROJECT_ID="$XGCPX_PROJECT"; PROJECT_SOURCE="XGCPX_PROJECT"
+elif [[ -n "${STUDENT_PROJECT_ID:-}" ]]; then
+  PROJECT_ID="$STUDENT_PROJECT_ID"; PROJECT_SOURCE="STUDENT_PROJECT_ID"
+else
+  PROJECT_ID="$(gcloud config get-value project 2>/dev/null | tr -d '[:space:]')"; PROJECT_SOURCE="gcloud config"
+fi
+PROJECT_ID="${PROJECT_ID//[[:space:]]/}"
+[[ -n "$PROJECT_ID" && "$PROJECT_ID" != "(unset)" ]] \
+  || fail "No project selected. Use --project, XGCPX_PROJECT, STUDENT_PROJECT_ID, or 'gcloud config set project PROJECT_ID'."
+[[ "$PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]] || fail "Invalid project ID: ${PROJECT_ID}"
+for forbidden in "${MAIN_PROJECT_ID:-}" "${XGCPX_FORBIDDEN_PROJECT:-}"; do
+  if [[ -n "$forbidden" && "$PROJECT_ID" == "$forbidden" ]]; then
+    fail "Refusing to deploy into protected project ${PROJECT_ID} (selected via ${PROJECT_SOURCE}). Pick another with --project."
+  fi
+done
+# Pin every tool to this one project for this run only; the user's gcloud config is not modified.
+export CLOUDSDK_CORE_PROJECT="$PROJECT_ID" GOOGLE_CLOUD_PROJECT="$PROJECT_ID" GOOGLE_PROJECT="$PROJECT_ID" \
+  GOOGLE_CLOUD_QUOTA_PROJECT="$PROJECT_ID" GOOGLE_BILLING_PROJECT="$PROJECT_ID"
 ACTIVE_ACCOUNT="$(gcloud config get-value account 2>/dev/null | tr -d '[:space:]')"
 [[ -n "$ACTIVE_ACCOUNT" && "$ACTIVE_ACCOUNT" != "(unset)" ]] || fail "No active gcloud account. Authenticate with gcloud."
 if ! gcloud auth print-access-token --account="$ACTIVE_ACCOUNT" >/dev/null 2>&1; then
@@ -146,7 +202,12 @@ if ! gcloud auth print-access-token --account="$ACTIVE_ACCOUNT" >/dev/null 2>&1;
 fi
 
 printf '\n%s\n' "xgcpx | GCP Gateway Deployment"
-printf 'Project: %s | Account: %s\n\n' "$PROJECT_ID" "$ACTIVE_ACCOUNT"
+printf 'Project: %s (from %s) | Account: %s\n\n' "$PROJECT_ID" "$PROJECT_SOURCE" "$ACTIVE_ACCOUNT"
+if [[ "${ASSUME_YES,,}" != "true" ]]; then
+  [[ -t 0 ]] || fail "Not a terminal; pass --yes (or XGCPX_ASSUME_YES=true) to confirm deployment into ${PROJECT_ID}."
+  read -r -p "Deploy into project ${PROJECT_ID}? [y/N]: " CONFIRM_PROJECT || CONFIRM_PROJECT=""
+  [[ "${CONFIRM_PROJECT,,}" == "y" || "${CONFIRM_PROJECT,,}" == "yes" ]] || fail "Cancelled; nothing was changed."
+fi
 
 # Enable APIs before project, billing, region, or Terraform preflight checks.
 section "PREFLIGHT  |  Enable required Google Cloud APIs"
@@ -201,6 +262,10 @@ fi
 [[ "$BILLING_STATUS" == "True" || "$BILLING_STATUS" == "true" ]] \
   || fail "Billing is not enabled for ${PROJECT_ID}. Link an active billing account before deploying Cloud Run, Compute Engine, load balancing, or Cloud Armor."
 
+PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)' 2>/dev/null)" \
+  || fail "Cannot read the project number for ${PROJECT_ID}."
+[[ "$PROJECT_NUMBER" =~ ^[0-9]+$ ]] || fail "Unexpected project number: ${PROJECT_NUMBER}"
+
 if [[ -z "$REGION_HINT" ]]; then
   configured_region="$(gcloud config get-value compute/region 2>/dev/null || true)"
   if [[ -n "$configured_region" && "$configured_region" != "(unset)" ]]; then
@@ -211,7 +276,8 @@ fi
 
 section "GATEWAY  |  Select the Cloud Run HTTP proxy"
 printf '%s\n' "1) Envoy" "2) Nginx" "3) Caddy" "4) Traefik" "5) Unified Gateway (Caddy)"
-read -r -p "Gateway service [1-5, default 5]: " GATEWAY_CHOICE
+prompt_value GATEWAY_CHOICE "${XGCPX_GATEWAY:-}" "Gateway service [1-5, default 5]: "
+case "${GATEWAY_CHOICE,,}" in envoy) GATEWAY_CHOICE=1 ;; nginx) GATEWAY_CHOICE=2 ;; caddy) GATEWAY_CHOICE=3 ;; traefik) GATEWAY_CHOICE=4 ;; unified) GATEWAY_CHOICE=5 ;; esac
 case "${GATEWAY_CHOICE:-5}" in
   1) GATEWAY="envoy"; DOCKERFILE="proxies/envoy/Dockerfile" ;;
   2) GATEWAY="nginx"; DOCKERFILE="proxies/nginx/Dockerfile" ;;
@@ -321,6 +387,11 @@ for protocol in "${PROTOCOL_OPTIONS[@]}"; do
     8) PROTOCOL_TAGS+=(ssh-ws) ;;
   esac
 done
+if [[ "$PROTOCOL_RUNTIME" == "vm" && ${#PROTOCOL_TAGS[@]} -eq 0 && "$ENABLE_OPENVPN" == "true" ]]; then
+  info "Only OpenVPN was selected; using the OpenVPN-only VM layout (no Xray container, no relay hostname needed)."
+  PROTOCOL_RUNTIME="cloud-run"
+  PROTOCOL_TCP_PORTS=()
+fi
 if [[ "$PROTOCOL_RUNTIME" == "vm" ]]; then
   ENABLE_PROTOCOL_VM=true
   ENABLE_CLOUDRUN_PROTOCOLS=false
@@ -334,7 +405,7 @@ fi
 if [[ "$ENABLE_OPENVPN" == "true" ]]; then
   command -v openssl >/dev/null 2>&1 || fail "OpenVPN certificate generation requires openssl."
 fi
-read -r -p "Service name [${DEFAULT_SERVICE}]: " SERVICE_NAME
+prompt_value SERVICE_NAME "${XGCPX_SERVICE:-}" "Service name [${DEFAULT_SERVICE}]: "
 SERVICE_NAME="${SERVICE_NAME:-$DEFAULT_SERVICE}"
 [[ "$SERVICE_NAME" =~ ^[a-z]([-a-z0-9]{0,47}[a-z0-9])?$ ]] || fail "Invalid Cloud Run service name: $SERVICE_NAME"
 
@@ -344,7 +415,8 @@ printf '\n%s\n' "Compute tier:" \
   "1) e2-micro (2 shared vCPUs, 1 GiB; possible Always Free VM in us-central1/us-west1/us-east1)" \
   "2) e2-small" "3) e2-medium" "4) c2-standard-4" "5) c2d-highcpu-8"
 info "Each e2-micro VM uses a 15 GB pd-standard disk; gateway plus OpenVPN VM totals 30 GB. Gateway replicas are capped at one, and other resources can still incur charges."
-read -r -p "Machine type for the gateway and any protocol VM [1-5, default 2]: " TIER_CHOICE
+prompt_value TIER_CHOICE "${XGCPX_TIER:-}" "Machine type for the gateway and any protocol VM [1-5, default 2]: "
+case "${TIER_CHOICE,,}" in e2-micro) TIER_CHOICE=1 ;; e2-small) TIER_CHOICE=2 ;; e2-medium) TIER_CHOICE=3 ;; c2-standard-4) TIER_CHOICE=4 ;; c2d-highcpu-8) TIER_CHOICE=5 ;; esac
 case "${TIER_CHOICE:-2}" in
   1) MACHINE_TYPE="e2-micro" ;;
   2) MACHINE_TYPE="e2-small" ;;
@@ -424,51 +496,51 @@ if [[ -n "$REGION_ROWS" ]]; then mapfile -t REGIONS <<<"$REGION_ROWS"; fi
 ((${#REGIONS[@]} > 0)) || fail "No region currently satisfies all three checks: Cloud Run support, Compute Engine region status UP, and ${MACHINE_TYPE} listed for this project."
 region_flag() {
   case "$1" in
-    us-central1*) printf '🇺🇸 Iowa, USA' ;;
-    us-east1*) printf '🇺🇸 South Carolina, USA' ;;
-    us-east4*) printf '🇺🇸 Northern Virginia, USA' ;;
-    us-east5*) printf '🇺🇸 Columbus, USA' ;;
-    us-south1*) printf '🇺🇸 Dallas, USA' ;;
-    us-west1*) printf '🇺🇸 Oregon, USA' ;;
-    us-west2*) printf '🇺🇸 Los Angeles, USA' ;;
-    us-west3*) printf '🇺🇸 Salt Lake City, USA' ;;
-    us-west4*) printf '🇺🇸 Las Vegas, USA' ;;
-    northamerica-northeast1*) printf '🇨🇦 Montreal, Canada' ;;
-    northamerica-northeast2*) printf '🇨🇦 Toronto, Canada' ;;
-    northamerica-south1*) printf '🇲🇽 Mexico' ;;
-    southamerica-east1*) printf '🇧🇷 Sao Paulo, Brazil' ;;
-    southamerica-west1*) printf '🇨🇱 Santiago, Chile' ;;
-    europe-west1*) printf '🇧🇪 Belgium' ;;
-    europe-west2*) printf '🇬🇧 London, UK' ;;
-    europe-west3*) printf '🇩🇪 Frankfurt, Germany' ;;
-    europe-west4*) printf '🇳🇱 Netherlands' ;;
-    europe-west6*) printf '🇨🇭 Zurich, Switzerland' ;;
-    europe-west8*) printf '🇮🇹 Milan, Italy' ;;
-    europe-west9*) printf '🇫🇷 Paris, France' ;;
-    europe-west10*) printf '🇩🇪 Berlin, Germany' ;;
-    europe-west12*) printf '🇮🇹 Turin, Italy' ;;
-    europe-north1*) printf '🇫🇮 Finland' ;;
-    europe-north2*) printf '🇸🇪 Stockholm, Sweden' ;;
-    europe-central2*) printf '🇵🇱 Warsaw, Poland' ;;
-    europe-southwest1*) printf '🇪🇸 Madrid, Spain' ;;
-    asia-east1*) printf '🇹🇼 Taiwan' ;;
-    asia-east2*) printf '🇭🇰 Hong Kong' ;;
-    asia-northeast1*) printf '🇯🇵 Tokyo, Japan' ;;
-    asia-northeast2*) printf '🇯🇵 Osaka, Japan' ;;
-    asia-northeast3*) printf '🇰🇷 Seoul, South Korea' ;;
-    asia-south1*) printf '🇮🇳 Mumbai, India' ;;
-    asia-south2*) printf '🇮🇳 Delhi, India' ;;
-    asia-south3*) printf '🇮🇳 India' ;;
-    asia-southeast1*) printf '🇸🇬 Singapore' ;;
-    asia-southeast2*) printf '🇮🇩 Jakarta, Indonesia' ;;
-    asia-southeast3*) printf '🇹🇭 Bangkok, Thailand' ;;
-    australia-southeast1*) printf '🇦🇺 Sydney, Australia' ;;
-    australia-southeast2*) printf '🇦🇺 Melbourne, Australia' ;;
-    me-central1*) printf '🇶🇦 Doha, Qatar' ;;
-    me-central2*) printf '🇸🇦 Dammam, Saudi Arabia' ;;
-    me-west1*) printf '🇮🇱 Tel Aviv, Israel' ;;
-    africa-south1*) printf '🇿🇦 Johannesburg, South Africa' ;;
-    *) printf '🌐 %s' "$2" ;;
+    us-central1*) printf 'Iowa, USA' ;;
+    us-east1*) printf 'South Carolina, USA' ;;
+    us-east4*) printf 'Northern Virginia, USA' ;;
+    us-east5*) printf 'Columbus, USA' ;;
+    us-south1*) printf 'Dallas, USA' ;;
+    us-west1*) printf 'Oregon, USA' ;;
+    us-west2*) printf 'Los Angeles, USA' ;;
+    us-west3*) printf 'Salt Lake City, USA' ;;
+    us-west4*) printf 'Las Vegas, USA' ;;
+    northamerica-northeast1*) printf 'Montreal, Canada' ;;
+    northamerica-northeast2*) printf 'Toronto, Canada' ;;
+    northamerica-south1*) printf 'Mexico' ;;
+    southamerica-east1*) printf 'Sao Paulo, Brazil' ;;
+    southamerica-west1*) printf 'Santiago, Chile' ;;
+    europe-west1*) printf 'Belgium' ;;
+    europe-west2*) printf 'London, UK' ;;
+    europe-west3*) printf 'Frankfurt, Germany' ;;
+    europe-west4*) printf 'Netherlands' ;;
+    europe-west6*) printf 'Zurich, Switzerland' ;;
+    europe-west8*) printf 'Milan, Italy' ;;
+    europe-west9*) printf 'Paris, France' ;;
+    europe-west10*) printf 'Berlin, Germany' ;;
+    europe-west12*) printf 'Turin, Italy' ;;
+    europe-north1*) printf 'Finland' ;;
+    europe-north2*) printf 'Stockholm, Sweden' ;;
+    europe-central2*) printf 'Warsaw, Poland' ;;
+    europe-southwest1*) printf 'Madrid, Spain' ;;
+    asia-east1*) printf 'Taiwan' ;;
+    asia-east2*) printf 'Hong Kong' ;;
+    asia-northeast1*) printf 'Tokyo, Japan' ;;
+    asia-northeast2*) printf 'Osaka, Japan' ;;
+    asia-northeast3*) printf 'Seoul, South Korea' ;;
+    asia-south1*) printf 'Mumbai, India' ;;
+    asia-south2*) printf 'Delhi, India' ;;
+    asia-south3*) printf 'India' ;;
+    asia-southeast1*) printf 'Singapore' ;;
+    asia-southeast2*) printf 'Jakarta, Indonesia' ;;
+    asia-southeast3*) printf 'Bangkok, Thailand' ;;
+    australia-southeast1*) printf 'Sydney, Australia' ;;
+    australia-southeast2*) printf 'Melbourne, Australia' ;;
+    me-central1*) printf 'Doha, Qatar' ;;
+    me-central2*) printf 'Dammam, Saudi Arabia' ;;
+    me-west1*) printf 'Tel Aviv, Israel' ;;
+    africa-south1*) printf 'Johannesburg, South Africa' ;;
+    *) printf '%s' "$2" ;;
   esac
 }
 region_name() { printf '%s' "${1%%$'\t'*}"; }
@@ -476,7 +548,7 @@ region_description() { printf '%s' "${1#*$'\t'}"; }
 for index in "${!REGIONS[@]}"; do
   region="$(region_name "${REGIONS[$index]}")"
   description="$(region_description "${REGIONS[$index]}")"
-  printf '  %2d) %-24s %-20s %s\n' "$((index + 1))" "$region" "$(region_flag "$region" "$description")" "$description"
+  printf '  %2d) %-26s %s\n' "$((index + 1))" "$region" "$(region_flag "$region" "$description")"
 done
 
 REGION=""
@@ -583,12 +655,29 @@ fi
 info "Quota check covers the initial two VMs; it cannot guarantee future zonal capacity or organization-policy approval."
 
 section "APPLICATION  |  Configure the HTTPS hostname and upstream"
-read -r -p "Hostname for managed HTTPS certificate (e.g. api.example.com): " DOMAIN
-[[ "$DOMAIN" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]] || fail "Enter a valid DNS hostname."
-RELAY_DOMAIN="relay.${DOMAIN}"
-(( ${#RELAY_DOMAIN} <= 253 )) || fail "The generated protocol hostname exceeds the DNS name length limit."
+DNS_NAME_RE='^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$'
+prompt_value DOMAIN "${XGCPX_DOMAIN:-}" "Custom hostname for managed HTTPS (leave blank for the automatic Cloud Run host): "
+DOMAIN="${DOMAIN//[[:space:]]/}"
+USE_CLOUD_RUN_HOST=false
+if [[ -z "$DOMAIN" ]]; then
+  USE_CLOUD_RUN_HOST=true
+  DOMAIN="${SERVICE_NAME}-${PROJECT_NUMBER}.${REGION}.run.app"
+  RELAY_DOMAIN="${XGCPX_RELAY_DOMAIN:-}"
+  info "Using the automatic Cloud Run host (predicted: ${DOMAIN}); the real URL is read back after deploy."
+  info "No load balancer, certificate, or DNS record is created in this mode; Cloud Armor rules do not apply."
+else
+  [[ "$DOMAIN" =~ $DNS_NAME_RE ]] || fail "Enter a valid DNS hostname, or leave it blank for the automatic Cloud Run host."
+  RELAY_DOMAIN="${XGCPX_RELAY_DOMAIN:-relay.${DOMAIN}}"
+fi
+if [[ -n "$RELAY_DOMAIN" ]]; then
+  [[ "$RELAY_DOMAIN" =~ $DNS_NAME_RE ]] || fail "XGCPX_RELAY_DOMAIN is not a valid DNS hostname."
+  (( ${#RELAY_DOMAIN} <= 253 )) || fail "The generated protocol hostname exceeds the DNS name length limit."
+fi
+if [[ "$USE_CLOUD_RUN_HOST" == "true" && "$PROTOCOL_RUNTIME" == "vm" && -z "$RELAY_DOMAIN" ]]; then
+  fail "The VM protocol runtime needs a DNS name for Caddy TLS, which the automatic Cloud Run host cannot provide. Set XGCPX_RELAY_DOMAIN, choose the Cloud Run runtime, or enter a custom hostname."
+fi
 info "Cloud Run serves HTTP(S), WebSocket, and gRPC-over-HTTP routes; OpenVPN UDP remains on the VM."
-read -r -p "Optional HTTPS application upstream [blank uses the built-in Cloud Run API]: " UPSTREAM_PRIMARY_INPUT
+prompt_value UPSTREAM_PRIMARY_INPUT "${XGCPX_UPSTREAM:-}" "Optional HTTPS application upstream [blank uses the built-in Cloud Run API]: "
 if [[ -z "$UPSTREAM_PRIMARY_INPUT" ]]; then
   UPSTREAM_PRIMARY="http://127.0.0.1:8081"
   UPSTREAM_FALLBACK="$UPSTREAM_PRIMARY"
@@ -601,7 +690,7 @@ else
   upstream_host="$(python3 -c 'import sys; from urllib.parse import urlsplit; print(urlsplit(sys.argv[1]).hostname)' "$UPSTREAM_PRIMARY")"
   [[ "${upstream_host,,}" != "${DOMAIN,,}" && "${upstream_host,,}" != "${RELAY_DOMAIN,,}" ]] \
     || fail "The upstream cannot use the gateway or relay hostname; that would proxy back into this deployment."
-  read -r -p "Fallback HTTPS application upstream URL [same as primary]: " UPSTREAM_FALLBACK
+  prompt_value UPSTREAM_FALLBACK "${XGCPX_UPSTREAM_FALLBACK:-}" "Fallback HTTPS application upstream URL [same as primary]: "
   UPSTREAM_FALLBACK="${UPSTREAM_FALLBACK:-$UPSTREAM_PRIMARY}"
   [[ "$UPSTREAM_FALLBACK" == https://* ]] || fail "Use an HTTPS fallback URL."
   case "$UPSTREAM_FALLBACK" in *[[:space:]]*|*\"*|*\\*) fail "Fallback URL contains unsupported whitespace or quoting." ;; esac
@@ -622,8 +711,8 @@ else
 fi
 
 section "SECURITY  |  Configure optional Cloud Armor source rules"
-read -r -p "Cloud Armor deny CIDRs (comma-separated, blank for none): " BLOCKED_CIDR_INPUT
-read -r -p "Cloud Armor allow CIDRs (comma-separated, blank for unrestricted): " ALLOWED_CIDR_INPUT
+prompt_value BLOCKED_CIDR_INPUT "${XGCPX_BLOCKED_CIDRS:-}" "Cloud Armor deny CIDRs (comma-separated, blank for none): "
+prompt_value ALLOWED_CIDR_INPUT "${XGCPX_ALLOWED_CIDRS:-}" "Cloud Armor allow CIDRs (comma-separated, blank for unrestricted): "
 BLOCKED_CIDRS=()
 ALLOWED_CIDRS=()
 if [[ -n "$BLOCKED_CIDR_INPUT" ]]; then IFS=',' read -r -a BLOCKED_CIDRS <<< "$BLOCKED_CIDR_INPUT"; fi
@@ -636,18 +725,21 @@ done
 if ((${#ALLOWED_CIDRS[@]} > 0)); then
   warn "Cloud Armor will deny every client IP not present in the allowlist."
 fi
+if [[ "$USE_CLOUD_RUN_HOST" == "true" ]] && ((${#ALLOWED_CIDRS[@]} + ${#BLOCKED_CIDRS[@]} > 0)); then
+  warn "Cloud Armor is not used with the automatic Cloud Run host; these CIDR rules will be ignored."
+fi
 
 TCP_RANGES=()
 TCP_UPSTREAM_HOST="tcp.example.com:9000"
 TLS_UPSTREAM_HOST="tls.example.com:9443"
 if [[ "$GATEWAY" == "envoy" ]]; then
-  read -r -p "Envoy TCP upstream host:port [${TCP_UPSTREAM_HOST}]: " TCP_UPSTREAM_HOST_INPUT
+  prompt_value TCP_UPSTREAM_HOST_INPUT "${XGCPX_TCP_UPSTREAM:-}" "Envoy TCP upstream host:port [${TCP_UPSTREAM_HOST}]: "
   TCP_UPSTREAM_HOST="${TCP_UPSTREAM_HOST_INPUT:-$TCP_UPSTREAM_HOST}"
-  read -r -p "Envoy TLS passthrough upstream host:port [${TLS_UPSTREAM_HOST}]: " TLS_UPSTREAM_HOST_INPUT
+  prompt_value TLS_UPSTREAM_HOST_INPUT "${XGCPX_TLS_UPSTREAM:-}" "Envoy TLS passthrough upstream host:port [${TLS_UPSTREAM_HOST}]: "
   TLS_UPSTREAM_HOST="${TLS_UPSTREAM_HOST_INPUT:-$TLS_UPSTREAM_HOST}"
   [[ "$TCP_UPSTREAM_HOST" =~ ^([A-Za-z0-9.-]+):[0-9]{1,5}$ ]] || fail "Use a valid TCP upstream host:port."
   [[ "$TLS_UPSTREAM_HOST" =~ ^([A-Za-z0-9.-]+):[0-9]{1,5}$ ]] || fail "Use a valid TLS upstream host:port."
-  read -r -p "Optional CIDRs for Envoy VM TCP/TLS ports 9000/9443 (comma-separated, blank disables): " TCP_SOURCE_RANGES
+  prompt_value TCP_SOURCE_RANGES "${XGCPX_TCP_SOURCE_RANGES:-}" "Optional CIDRs for Envoy VM TCP/TLS ports 9000/9443 (comma-separated, blank disables): "
   if [[ -n "$TCP_SOURCE_RANGES" ]]; then
     IFS=',' read -r -a TCP_RANGES <<< "$TCP_SOURCE_RANGES"
     for index in "${!TCP_RANGES[@]}"; do TCP_RANGES[$index]="${TCP_RANGES[$index]//[[:space:]]/}"; done
@@ -666,10 +758,14 @@ json_array() {
 
 section "DEPLOY  |  Prepare state, images, and protocol credentials"
 STATE_BUCKET="${PROJECT_ID}-xgcpx-tfstate"
-PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
-if gcloud storage buckets describe "gs://${STATE_BUCKET}" --format='value(projectNumber)' >/dev/null 2>&1; then
-  BUCKET_PROJECT_NUMBER="$(gcloud storage buckets describe "gs://${STATE_BUCKET}" --format='value(projectNumber)')"
-  [[ "$BUCKET_PROJECT_NUMBER" == "$PROJECT_NUMBER" ]] || fail "Terraform state bucket exists but is not owned by project ${PROJECT_ID}."
+if BUCKET_JSON="$(gcloud storage buckets describe "gs://${STATE_BUCKET}" --format=json 2>/dev/null)"; then
+  # gcloud storage reports project_number; older output used projectNumber. Accept either.
+  BUCKET_PROJECT_NUMBER="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d.get("project_number") or d.get("projectNumber") or "")' "$BUCKET_JSON")"
+  if [[ -z "$BUCKET_PROJECT_NUMBER" ]]; then
+    warn "Could not read the owner of gs://${STATE_BUCKET}; continuing because the bucket name is derived from this project ID."
+  else
+    [[ "$BUCKET_PROJECT_NUMBER" == "$PROJECT_NUMBER" ]] || fail "Terraform state bucket exists but is not owned by project ${PROJECT_ID}."
+  fi
 else
   info "Creating private Terraform state bucket gs://${STATE_BUCKET}"
   gcloud storage buckets create "gs://${STATE_BUCKET}" --location="$REGION" --project="$PROJECT_ID" \
@@ -698,7 +794,7 @@ if [[ "$ENABLE_OPENVPN" == "true" ]]; then
   OPENVPN_SECRET_NAME="${SERVICE_NAME}-openvpn-config"
 fi
 PROTOCOL_VM_IMAGE="$PROTOCOL_IMAGE"
-if [[ "$PROTOCOL_RUNTIME" == "cloud-run" ]]; then PROTOCOL_VM_IMAGE=""; fi
+if [[ "$PROTOCOL_RUNTIME" == "cloud-run" || ${#PROTOCOL_TAGS[@]} -eq 0 ]]; then PROTOCOL_VM_IMAGE=""; fi
 PROTOCOL_STARTUP_SCRIPT="$(cat <<'PROTOCOL_STARTUP_EOF'
 #!/bin/bash
 set -Eeuo pipefail
@@ -867,7 +963,7 @@ VMESS_UUID="$VMESS_UUID" \
 SHADOWSOCKS_PASSWORD="$SHADOWSOCKS_PASSWORD" \
 TROJAN_PASSWORD="$TROJAN_PASSWORD" \
 EDGE_DOMAIN="$DOMAIN" \
-RELAY_DOMAIN="$RELAY_DOMAIN" \
+RELAY_DOMAIN="$RELAY_ENDPOINT" \
 DEPLOY_TAG="$DEPLOY_TAG" \
 python3 - "$PWD" <<'PY'
 import json
@@ -1034,6 +1130,7 @@ export TF_VAR_image="$IMAGE"
 export TF_VAR_backend_image="$BACKEND_IMAGE"
 export TF_VAR_machine_type="$MACHINE_TYPE"
 export TF_VAR_domain="$DOMAIN"
+export TF_VAR_use_cloud_run_host="$USE_CLOUD_RUN_HOST"
 export TF_VAR_upstream_primary="$UPSTREAM_PRIMARY"
 export TF_VAR_upstream_fallback="$UPSTREAM_FALLBACK"
 export TF_VAR_blocked_cidrs="$(json_array "${BLOCKED_CIDRS[@]}")"
@@ -1078,13 +1175,40 @@ if ! run_with_spinner "Applying the verified Terraform plan" \
 fi
 rm -f -- "$TERRAFORM_PLAN_FILE"
 TERRAFORM_PLAN_FILE=""
+if [[ "$USE_CLOUD_RUN_HOST" == "true" ]]; then
+  RUN_URL="$(gcloud run services describe "$SERVICE_NAME" --region="$REGION" --project="$PROJECT_ID" \
+    --format='value(status.url)' 2>/dev/null || true)"
+  if [[ "$RUN_URL" == https://* ]]; then
+    ACTUAL_HOST="${RUN_URL#https://}"; ACTUAL_HOST="${ACTUAL_HOST%%/*}"
+    if [[ "$ACTUAL_HOST" != "$DOMAIN" ]]; then
+      warn "Cloud Run reported ${ACTUAL_HOST}, not the predicted ${DOMAIN}; using the real host."
+    fi
+    DOMAIN="$ACTUAL_HOST"
+  else
+    warn "Could not read the Cloud Run URL; falling back to the predicted host ${DOMAIN}."
+  fi
+fi
+PROTOCOL_IP=""
+if [[ "$ENABLE_PROTOCOL_VM" == "true" ]]; then
+  PROTOCOL_IP="$(terraform -chdir=terraform output -raw protocol_gateway_ip)"
+fi
+# Direct-relay endpoints use the relay hostname when there is one, otherwise the VM IP.
+RELAY_ENDPOINT="${RELAY_DOMAIN:-$PROTOCOL_IP}"
 generate_client_profiles
 
-LB_IP="$(terraform -chdir=terraform output -raw load_balancer_ip)"
+LB_IP=""
+if [[ "$USE_CLOUD_RUN_HOST" != "true" ]]; then
+  LB_IP="$(terraform -chdir=terraform output -raw load_balancer_ip)"
+fi
 section "COMPLETE  |  Deployment outputs"
 printf '%s\n' "Service: $SERVICE_NAME" "Region: $REGION ($(region_flag "$REGION" "$REGION"))" "Gateway: $GATEWAY" \
-  "HTTPS URL: https://${DOMAIN}" "Global load balancer IP: ${LB_IP}" \
-  "DNS: create an A record for ${DOMAIN} pointing to ${LB_IP}; certificate provisioning starts after DNS resolves."
+  "HTTPS URL: https://${DOMAIN}"
+if [[ "$USE_CLOUD_RUN_HOST" == "true" ]]; then
+  printf '%s\n' "DNS: none needed; the automatic Cloud Run host is already live with a Google-managed certificate."
+else
+  printf '%s\n' "Global load balancer IP: ${LB_IP}" \
+    "DNS: create an A record for ${DOMAIN} pointing to ${LB_IP}; certificate provisioning starts after DNS resolves."
+fi
 printf 'Selected gateway image source: %s (only this gateway Dockerfile was built).\n' "$DOCKERFILE"
 printf '%s\n' \
   "Cloud Run application routes:" \
@@ -1100,9 +1224,7 @@ if [[ "$ENABLE_TCP_PROXY" == "true" ]]; then
     "$(terraform -chdir=terraform output -raw tls_proxy_ip)"
 fi
 
-PROTOCOL_IP=""
 if [[ "$ENABLE_PROTOCOL_VM" == "true" ]]; then
-  PROTOCOL_IP="$(terraform -chdir=terraform output -raw protocol_gateway_ip)"
   printf '\n%s\n' "Protocol VM public IP: ${PROTOCOL_IP}"
   if [[ "$PROTOCOL_RUNTIME" == "vm" ]]; then
     printf 'Protocol hostname: %s (create its A record directly to %s)\n' "$RELAY_DOMAIN" "$PROTOCOL_IP"
@@ -1127,7 +1249,7 @@ if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 1 "* ]]; then
   printf '  VLESS over TLS/HTTPUpgrade via Cloud Run: %s:443, path /vless-httpupgrade\n' "$DOMAIN"
 fi
 if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 2 "* ]]; then
-  printf '  VLESS over TLS/gRPC via Cloud Run: %s:443, service name vless-grpc; direct relay: %s:50051\n' "$DOMAIN" "$RELAY_DOMAIN"
+  printf '  VLESS over TLS/gRPC via Cloud Run: %s:443, service name vless-grpc; direct relay: %s:50051\n' "$DOMAIN" "$RELAY_ENDPOINT"
 fi
 if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 3 "* ]]; then
   printf '  VLESS xHTTP/TLS packet-up: %s:443, path /xhttp-packet (direct relay port 8080)\n' "$DOMAIN"
@@ -1136,7 +1258,7 @@ if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 3 "* ]]; then
 fi
 if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 4 "* ]]; then
   printf '  Shadowsocks: %s:8388 (TCP and UDP), method chacha20-ietf-poly1305\n  Shadowsocks password: %s\n' \
-    "$RELAY_DOMAIN" "$SHADOWSOCKS_PASSWORD"
+    "$RELAY_ENDPOINT" "$SHADOWSOCKS_PASSWORD"
 fi
 if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 6 "* ]]; then
   printf '  Trojan over TLS/WebSocket via Cloud Run: %s:443, path /trojan-ws\n  Trojan over TLS/HTTPUpgrade via Cloud Run: %s:443, path /trojan-httpupgrade\n  Trojan password: %s\n' \
