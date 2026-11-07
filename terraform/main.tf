@@ -33,6 +33,13 @@ resource "google_cloud_run_v2_service" "gateway" {
   deletion_protection = true
   labels              = local.common_labels
 
+  lifecycle {
+    precondition {
+      condition     = var.backend_image != ""
+      error_message = "The Cloud Run gateway requires the built-in backend sidecar image."
+    }
+  }
+
   template {
     timeout = "3600s"
     scaling {
@@ -40,7 +47,9 @@ resource "google_cloud_run_v2_service" "gateway" {
       max_instance_count = 100
     }
     containers {
-      image = var.image
+      name       = "gateway"
+      image      = var.image
+      depends_on = ["backend"]
       ports {
         name           = "h2c"
         container_port = 8080
@@ -58,6 +67,24 @@ resource "google_cloud_run_v2_service" "gateway" {
       env {
         name  = "UPSTREAM_FALLBACK"
         value = var.upstream_fallback
+      }
+    }
+    containers {
+      name  = "backend"
+      image = var.backend_image
+      startup_probe {
+        tcp_socket {
+          port = 8081
+        }
+        period_seconds    = 1
+        timeout_seconds   = 1
+        failure_threshold = 30
+      }
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "256Mi"
+        }
       }
     }
   }
@@ -238,6 +265,7 @@ resource "google_compute_instance" "protocol_vm" {
     google_project_iam_member.protocol_vm_artifact_reader,
     google_secret_manager_secret_iam_member.protocol_config_reader,
     google_secret_manager_secret_iam_member.openvpn_config_reader,
+    google_compute_global_forwarding_rule.https,
   ]
 
   lifecycle {

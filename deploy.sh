@@ -164,14 +164,31 @@ read -r -p "Hostname for managed HTTPS certificate (e.g. api.example.com): " DOM
 [[ "$DOMAIN" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]] || fail "Enter a valid DNS hostname."
 RELAY_DOMAIN="relay.${DOMAIN}"
 (( ${#RELAY_DOMAIN} <= 253 )) || fail "The generated protocol hostname exceeds the DNS name length limit."
-info "Cloud Run routes HTTP, WebSockets, and gRPC over HTTP; /api needs a reachable HTTPS application upstream. Raw TCP/UDP is VM-only."
-read -r -p "Primary HTTPS application upstream URL: " UPSTREAM_PRIMARY
-[[ "$UPSTREAM_PRIMARY" == https://* ]] || fail "Use an HTTPS upstream URL."
-case "$UPSTREAM_PRIMARY" in *[[:space:]]*|*\"*|*\\*) fail "Upstream URL contains unsupported whitespace or quoting." ;; esac
-read -r -p "Fallback HTTPS upstream URL [same as primary]: " UPSTREAM_FALLBACK
-UPSTREAM_FALLBACK="${UPSTREAM_FALLBACK:-$UPSTREAM_PRIMARY}"
-[[ "$UPSTREAM_FALLBACK" == https://* ]] || fail "Use an HTTPS fallback URL."
-case "$UPSTREAM_FALLBACK" in *[[:space:]]*|*\"*|*\\*) fail "Fallback URL contains unsupported whitespace or quoting." ;; esac
+info "Cloud Run serves HTTP(S), WebSocket, and gRPC-over-HTTP routes; OpenVPN UDP remains on the VM."
+read -r -p "Optional HTTPS application upstream [blank uses the built-in Cloud Run API]: " UPSTREAM_PRIMARY_INPUT
+if [[ -z "$UPSTREAM_PRIMARY_INPUT" ]]; then
+  UPSTREAM_PRIMARY="http://127.0.0.1:8081"
+  UPSTREAM_FALLBACK="$UPSTREAM_PRIMARY"
+  info "Using the built-in Cloud Run API sidecar; no self-referential domain upstream is configured."
+else
+  UPSTREAM_PRIMARY="$UPSTREAM_PRIMARY_INPUT"
+  [[ "$UPSTREAM_PRIMARY" == https://* ]] || fail "Use an HTTPS URL, or leave this blank for the built-in Cloud Run API."
+  case "$UPSTREAM_PRIMARY" in *[[:space:]]*|*\"*|*\\*) fail "Upstream URL contains unsupported whitespace or quoting." ;; esac
+  upstream_host="${UPSTREAM_PRIMARY#https://}"
+  upstream_host="${upstream_host%%/*}"
+  upstream_host="${upstream_host%%:*}"
+  [[ "${upstream_host,,}" != "${DOMAIN,,}" && "${upstream_host,,}" != "${RELAY_DOMAIN,,}" ]] \
+    || fail "The upstream cannot use the gateway or relay hostname; that would proxy back into this deployment."
+  read -r -p "Fallback HTTPS application upstream URL [same as primary]: " UPSTREAM_FALLBACK
+  UPSTREAM_FALLBACK="${UPSTREAM_FALLBACK:-$UPSTREAM_PRIMARY}"
+  [[ "$UPSTREAM_FALLBACK" == https://* ]] || fail "Use an HTTPS fallback URL."
+  case "$UPSTREAM_FALLBACK" in *[[:space:]]*|*\"*|*\\*) fail "Fallback URL contains unsupported whitespace or quoting." ;; esac
+  fallback_host="${UPSTREAM_FALLBACK#https://}"
+  fallback_host="${fallback_host%%/*}"
+  fallback_host="${fallback_host%%:*}"
+  [[ "${fallback_host,,}" != "${DOMAIN,,}" && "${fallback_host,,}" != "${RELAY_DOMAIN,,}" ]] \
+    || fail "The fallback cannot use the gateway or relay hostname; that would create a proxy loop."
+fi
 
 read -r -p "Cloud Armor deny CIDRs (comma-separated, blank for none): " BLOCKED_CIDR_INPUT
 read -r -p "Cloud Armor allow CIDRs (comma-separated, blank for unrestricted): " ALLOWED_CIDR_INPUT
@@ -240,6 +257,7 @@ if ! gcloud artifacts repositories describe "$AR_REPO" --location="$REGION" --pr
 fi
 DEPLOY_TAG="$(date -u +%Y%m%d%H%M%S)"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE_NAME}:${GATEWAY}-${DEPLOY_TAG}"
+BACKEND_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE_NAME}:backend-${DEPLOY_TAG}"
 PROTOCOL_IMAGE_TAG="protocol-${DEPLOY_TAG}"
 PROTOCOL_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${SERVICE_NAME}:${PROTOCOL_IMAGE_TAG}"
 PROTOCOL_SECRET_NAME="${SERVICE_NAME}-protocol-config"
@@ -345,6 +363,10 @@ run_with_spinner "Configuring Artifact Registry authentication" gcloud auth conf
 run_with_spinner "Building ${GATEWAY} gateway image" docker build --platform linux/amd64 --file "$DOCKERFILE" --tag "$IMAGE" .
 run_with_spinner "Pushing ${GATEWAY} gateway image" docker push "$IMAGE"
 
+run_with_spinner "Building the built-in Cloud Run API backend" docker build --platform linux/amd64 \
+  --file backend/Dockerfile --tag "$BACKEND_IMAGE" backend
+run_with_spinner "Pushing the built-in Cloud Run API backend" docker push "$BACKEND_IMAGE"
+
 run_with_spinner "Building the authenticated protocol VM image" docker build --platform linux/amd64 --file proxies/xray/Dockerfile --tag "$PROTOCOL_IMAGE" .
 run_with_spinner "Pushing the authenticated protocol VM image" docker push "$PROTOCOL_IMAGE"
 if [[ "$ENABLE_OPENVPN" == "true" ]]; then
@@ -447,6 +469,7 @@ export TF_VAR_project_id="$PROJECT_ID"
 export TF_VAR_region="$REGION"
 export TF_VAR_service_name="$SERVICE_NAME"
 export TF_VAR_image="$IMAGE"
+export TF_VAR_backend_image="$BACKEND_IMAGE"
 export TF_VAR_machine_type="$MACHINE_TYPE"
 export TF_VAR_domain="$DOMAIN"
 export TF_VAR_upstream_primary="$UPSTREAM_PRIMARY"
@@ -489,9 +512,10 @@ printf 'Selected gateway image source: %s (only this gateway Dockerfile was buil
 printf '%s\n' \
   "Cloud Run application routes:" \
   "  HTTPS/TLS: https://${DOMAIN} (TLS terminates at the external HTTPS load balancer)" \
-  "  Health: /healthz | API and WebSocket upgrade: /api/* | gRPC: application gRPC paths" \
+  "  Health: /healthz | API: /api/* (built-in sidecar unless an external upstream is supplied)" \
+  "  WebSocket/gRPC: requires a compatible application upstream; Cloud Run carries these over HTTP(S)" \
   "  Persistent streaming: /persistent/* | Assets: /assets/*" \
-  "  WebSocket/gRPC sessions require a compatible application upstream; this is not an SSH or OpenVPN transport."
+  "  These HTTP routes do not provide SSH or OpenVPN transport."
 if [[ "$ENABLE_TCP_PROXY" == "true" ]]; then
   printf 'Envoy TCP endpoint: %s:9000\nEnvoy TLS passthrough endpoint: %s:9443\n' \
     "$(terraform -chdir=terraform output -raw tcp_proxy_ip)" \

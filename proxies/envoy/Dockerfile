@@ -1,6 +1,6 @@
 FROM envoyproxy/envoy:v1.32-latest
-ENV UPSTREAM_PRIMARY=https://example.com \
-	UPSTREAM_FALLBACK=https://example.net \
+ENV UPSTREAM_PRIMARY=http://127.0.0.1:8081 \
+	UPSTREAM_FALLBACK=http://127.0.0.1:8081 \
 	TCP_UPSTREAM_HOST=tcp.example.com:9000 \
 	TLS_UPSTREAM_HOST=tls.example.com:9443
 USER root

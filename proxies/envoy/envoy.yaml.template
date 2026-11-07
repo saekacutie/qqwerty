@@ -92,18 +92,7 @@ static_resources:
           - priority: 1
             lb_endpoints:
               - endpoint: { address: { socket_address: { address: "${FALLBACK_HOST}", port_value: ${FALLBACK_PORT} } } }
-      transport_socket:
-        name: envoy.transport_sockets.tls
-        typed_config:
-          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-          sni: "${PRIMARY_HOST}"
-          common_tls_context:
-            validation_context:
-              trusted_ca:
-                filename: /etc/ssl/certs/ca-certificates.crt
-              match_typed_subject_alt_names:
-                - san_type: DNS
-                  matcher: { exact: "${PRIMARY_HOST}" }
+      ${UPSTREAM_TRANSPORT_SOCKET}
     - name: tcp_upstream
       type: STRICT_DNS
       connect_timeout: 5s

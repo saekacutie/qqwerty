@@ -1,6 +1,6 @@
 FROM traefik:v3.2
 RUN apk add --no-cache ca-certificates gettext
-ENV UPSTREAM_PRIMARY=https://example.com UPSTREAM_FALLBACK=https://example.net
+ENV UPSTREAM_PRIMARY=http://127.0.0.1:8081 UPSTREAM_FALLBACK=http://127.0.0.1:8081
 COPY proxies/traefik/traefik.yml /etc/traefik/traefik.yml
 COPY proxies/traefik/dynamic.yml.template /etc/traefik/dynamic.yml.template
 COPY proxies/traefik/docker-entrypoint.sh /docker-entrypoint.sh

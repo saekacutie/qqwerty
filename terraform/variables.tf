@@ -24,6 +24,11 @@ variable "image" {
   type        = string
 }
 
+variable "backend_image" {
+  description = "Built-in Cloud Run API backend image used when no external HTTPS upstream is configured."
+  type        = string
+}
+
 variable "enable_protocol_gateway" {
   description = "Create a public, authenticated protocol VM with a dedicated static IP."
   type        = bool
@@ -149,24 +154,24 @@ variable "domain" {
 }
 
 variable "upstream_primary" {
-  description = "Primary application upstream URL."
+  description = "Primary HTTP(S) application upstream URL. The built-in Cloud Run API sidecar is the local HTTP default."
   type        = string
-  default     = "https://example.com"
+  default     = "http://127.0.0.1:8081"
 
   validation {
-    condition     = can(regex("^https://[^[:space:]\"\\\\]+$", var.upstream_primary))
-    error_message = "upstream_primary must be an HTTPS URL without whitespace or quotes."
+    condition     = var.upstream_primary == "http://127.0.0.1:8081" || can(regex("^https://[^[:space:]\"\\\\]+$", var.upstream_primary))
+    error_message = "upstream_primary must be HTTPS or the built-in http://127.0.0.1:8081 backend."
   }
 }
 
 variable "upstream_fallback" {
-  description = "Fallback application upstream URL."
+  description = "Fallback HTTP(S) application upstream URL. The built-in Cloud Run API sidecar is the local HTTP default."
   type        = string
-  default     = "https://example.com"
+  default     = "http://127.0.0.1:8081"
 
   validation {
-    condition     = can(regex("^https://[^[:space:]\"\\\\]+$", var.upstream_fallback))
-    error_message = "upstream_fallback must be an HTTPS URL without whitespace or quotes."
+    condition     = var.upstream_fallback == "http://127.0.0.1:8081" || can(regex("^https://[^[:space:]\"\\\\]+$", var.upstream_fallback))
+    error_message = "upstream_fallback must be HTTPS or the built-in http://127.0.0.1:8081 backend."
   }
 }
 

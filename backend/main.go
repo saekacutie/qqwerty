@@ -6,11 +6,22 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 type statusResponse struct {
 	Service string `json:"service"`
 	Status  string `json:"status"`
+	Time    string `json:"time"`
+}
+
+type apiResponse struct {
+	Service string `json:"service"`
+	Status  string `json:"status"`
+	Method  string `json:"method"`
+	Path    string `json:"path"`
 	Time    string `json:"time"`
 }
 
@@ -33,9 +44,21 @@ func main() {
 			Time:    time.Now().UTC().Format(time.RFC3339),
 		})
 	})
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Server-Status", "200")
+		_ = json.NewEncoder(w).Encode(apiResponse{
+			Service: "xgcpx-api",
+			Status:  "ready",
+			Method:  r.Method,
+			Path:    r.URL.Path,
+			Time:    time.Now().UTC().Format(time.RFC3339),
+		})
+	})
 	server := &http.Server{
 		Addr:              ":8081",
-		Handler:           requestLogger(logger, mux),
+		Handler:           h2c.NewHandler(requestLogger(logger, mux), &http2.Server{}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	logger.Info("control backend starting", "address", server.Addr)
