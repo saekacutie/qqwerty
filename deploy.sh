@@ -220,10 +220,11 @@ case "${GATEWAY_CHOICE:-5}" in
 esac
 info "Selected ${GATEWAY} gateway; the image will be built from ${DOCKERFILE}."
 
-# The separate static-IP VM serves native protocols; Cloud Run remains HTTP(S)-only.
+# Native protocol services run on a separate static-IP VM; Cloud Run remains HTTP(S)-only.
 section "PROTOCOLS  |  Select services for the separate protocol VM"
 printf '\n%s\n' \
   "Protocol services (separate VM IP):" \
+  "Any selection below uses a protocol VM; OpenVPN is optional and is not required for the other protocols." \
   "1) VLESS over WebSocket and HTTPUpgrade (TLS via Caddy on 443)" \
   "2) VLESS gRPC over TLS (443 and 50051)" \
   "3) VLESS xHTTP packet-up, stream-up, and stream-one (443 and 8080)" \
@@ -278,9 +279,10 @@ read -r -p "Service name [${DEFAULT_SERVICE}]: " SERVICE_NAME
 SERVICE_NAME="${SERVICE_NAME:-$DEFAULT_SERVICE}"
 [[ "$SERVICE_NAME" =~ ^[a-z]([-a-z0-9]{0,47}[a-z0-9])?$ ]] || fail "Invalid Cloud Run service name: $SERVICE_NAME"
 
-section "COMPUTE  |  Select the VM tier"
+section "COMPUTE  |  Select the VM tier used by this deployment"
+info "This stack always creates a gateway VM; selected protocol services use a second VM. This tier applies to both, whether or not OpenVPN is selected."
 printf '\n%s\n' "Compute tier:" "1) e2-micro" "2) e2-small" "3) e2-medium" "4) c2-standard-4" "5) c2d-highcpu-8"
-read -r -p "VM tier [1-5, default 2]: " TIER_CHOICE
+read -r -p "Machine type for the gateway and protocol VMs [1-5, default 2]: " TIER_CHOICE
 case "${TIER_CHOICE:-2}" in
   1) MACHINE_TYPE="e2-micro" ;;
   2) MACHINE_TYPE="e2-small" ;;
@@ -292,7 +294,7 @@ esac
 info "Selected VM machine type: ${MACHINE_TYPE}."
 if [[ "$MACHINE_TYPE" == "e2-micro" ]]; then
   warn "e2-micro is a shared-core 2-vCPU, 1-GiB VM; it may qualify for Always Free only in eligible US regions and within current monthly limits."
-  warn "The protocol gateway is an additional VM. This stack also includes disks, load balancers, Cloud Armor, Cloud Run, and network egress that may incur charges."
+  warn "The protocol VM is additional to the gateway VM. Disks, load balancers, Cloud Armor, Cloud Run, and network egress may also incur charges."
 else
   warn "${MACHINE_TYPE} is not an Always Free VM tier; check current GCP pricing and quotas before deployment."
 fi
