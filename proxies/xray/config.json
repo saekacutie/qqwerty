@@ -97,6 +97,47 @@
         "password": "__SHADOWSOCKS_PASSWORD__",
         "network": "tcp,udp"
       }
+    },
+    {
+      "tag": "trojan-ws",
+      "listen": "127.0.0.1",
+      "port": 10007,
+      "protocol": "trojan",
+      "settings": {
+        "clients": [{ "password": "__TROJAN_PASSWORD__" }]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": { "path": "/trojan-ws" }
+      }
+    },
+    {
+      "tag": "vmess-ws",
+      "listen": "127.0.0.1",
+      "port": 10008,
+      "protocol": "vmess",
+      "settings": {
+        "clients": [{ "id": "__VMESS_UUID__", "alterId": 0, "security": "auto" }]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": { "path": "/vmess-ws" }
+      }
+    },
+    {
+      "tag": "ssh-ws",
+      "listen": "127.0.0.1",
+      "port": 10009,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1",
+        "port": 22,
+        "network": "tcp"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": { "path": "/ssh-ws" }
+      }
     }
   ],
   "outbounds": [

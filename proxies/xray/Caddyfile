@@ -10,45 +10,60 @@ http://{$RELAY_DOMAIN} {
 }
 
 {$RELAY_DOMAIN} {
-	@grpc header Content-Type application/grpc*
-	reverse_proxy @grpc h2c://127.0.0.1:10003
+	route {
+		@grpc header Content-Type application/grpc*
+		reverse_proxy @grpc h2c://127.0.0.1:10003
 
-	@vless_ws path /vless-ws
-	reverse_proxy @vless_ws 127.0.0.1:10001
+		@vless_ws path /vless-ws
+		reverse_proxy @vless_ws 127.0.0.1:10001
 
-	@vless_httpupgrade path /vless-httpupgrade
-	reverse_proxy @vless_httpupgrade 127.0.0.1:10002
+		@vless_httpupgrade path /vless-httpupgrade
+		reverse_proxy @vless_httpupgrade 127.0.0.1:10002
 
-	@xhttp_packet path /xhttp-packet*
-	reverse_proxy @xhttp_packet 127.0.0.1:10004
+		@trojan_ws path /trojan-ws
+		reverse_proxy @trojan_ws 127.0.0.1:10007
 
-	@xhttp_chunked path /xhttp-chunked*
-	reverse_proxy @xhttp_chunked 127.0.0.1:10005
+		@vmess_ws path /vmess-ws
+		reverse_proxy @vmess_ws 127.0.0.1:10008
 
-	@xhttp_request_response path /xhttp-request-response*
-	reverse_proxy @xhttp_request_response 127.0.0.1:10006
+		@ssh_ws path /ssh-ws
+		reverse_proxy @ssh_ws 127.0.0.1:10009
 
-	handle {
-		respond "not found" 404
+		@xhttp_packet path /xhttp-packet*
+		reverse_proxy @xhttp_packet 127.0.0.1:10004
+
+		@xhttp_chunked path /xhttp-chunked*
+		reverse_proxy @xhttp_chunked 127.0.0.1:10005
+
+		@xhttp_request_response path /xhttp-request-response*
+		reverse_proxy @xhttp_request_response 127.0.0.1:10006
+
+		handle {
+			respond "not found" 404
+		}
 	}
 }
 
 https://{$RELAY_DOMAIN}:8081 {
-	@xhttp_packet path /xhttp-packet*
-	reverse_proxy @xhttp_packet 127.0.0.1:10004
-	@xhttp_chunked path /xhttp-chunked*
-	reverse_proxy @xhttp_chunked 127.0.0.1:10005
-	@xhttp_request_response path /xhttp-request-response*
-	reverse_proxy @xhttp_request_response 127.0.0.1:10006
-	handle {
-		respond "not found" 404
+	route {
+		@xhttp_packet path /xhttp-packet*
+		reverse_proxy @xhttp_packet 127.0.0.1:10004
+		@xhttp_chunked path /xhttp-chunked*
+		reverse_proxy @xhttp_chunked 127.0.0.1:10005
+		@xhttp_request_response path /xhttp-request-response*
+		reverse_proxy @xhttp_request_response 127.0.0.1:10006
+		handle {
+			respond "not found" 404
+		}
 	}
 }
 
 https://{$RELAY_DOMAIN}:50052 {
-	@grpc header Content-Type application/grpc*
-	reverse_proxy @grpc h2c://127.0.0.1:10003
-	handle {
-		respond "not found" 404
+	route {
+		@grpc header Content-Type application/grpc*
+		reverse_proxy @grpc h2c://127.0.0.1:10003
+		handle {
+			respond "not found" 404
+		}
 	}
 }

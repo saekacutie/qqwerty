@@ -229,21 +229,22 @@ printf '\n%s\n' \
   "3) VLESS xHTTP packet-up, stream-up, and stream-one (443 and 8080)" \
   "4) Shadowsocks TCP and UDP (8388)" \
   "5) All protocol services" \
-  "6) OpenVPN over UDP (1194; VM public IP only, never Cloud Run)"
+  "6) OpenVPN over UDP (1194; VM public IP only, never Cloud Run)" \
+  "7) Trojan over TLS/WebSocket (443)" \
+  "8) VMess over TLS/WebSocket (443)" \
+  "9) SSH over TLS/WebSocket (443; generated password)"
 PROTOCOL_SELECTION="${XGCPX_PROTOCOLS:-}"
 if [[ -z "$PROTOCOL_SELECTION" ]]; then
   if [[ -t 0 ]]; then
-    read -r -p "Protocols [1-4, 6, comma-separated, or all; default all]: " PROTOCOL_SELECTION
+    read -r -p "Protocols [1-4, 6-9, comma-separated, or all; default all]: " PROTOCOL_SELECTION
   fi
   PROTOCOL_SELECTION="${PROTOCOL_SELECTION:-all}"
 fi
 PROTOCOL_SELECTION="${PROTOCOL_SELECTION,,}"
 PROTOCOL_SELECTION="${PROTOCOL_SELECTION//[[:space:]]/}"
-[[ "$PROTOCOL_SELECTION" =~ ^(all|5|[1-46](,[1-46])*)$ ]] || fail "Choose all, 5, 6, or comma-separated selections from 1 to 4 and 6."
-
 PROTOCOL_OPTIONS=()
 if [[ "$PROTOCOL_SELECTION" == "all" || "$PROTOCOL_SELECTION" == "5" ]]; then
-  PROTOCOL_OPTIONS=(1 2 3 4 6)
+  PROTOCOL_OPTIONS=(1 2 3 4 6 7 8 9)
 else
   IFS=',' read -r -a PROTOCOL_OPTIONS <<< "$PROTOCOL_SELECTION"
 fi
@@ -253,6 +254,7 @@ PROTOCOL_TAGS=()
 ENABLE_OPENVPN=false
 SEEN_PROTOCOLS=" "
 for protocol in "${PROTOCOL_OPTIONS[@]}"; do
+  [[ "$protocol" =~ ^(1|2|3|4|6|7|8|9)$ ]] || fail "Choose 1-4 or 6-9; 5/all must be selected alone."
   [[ "$SEEN_PROTOCOLS" != *" $protocol "* ]] || fail "Protocol selections must not contain duplicates."
   SEEN_PROTOCOLS+="${protocol} "
   case "$protocol" in
@@ -261,6 +263,9 @@ for protocol in "${PROTOCOL_OPTIONS[@]}"; do
     3) PROTOCOL_TAGS+=(xhttp-packet xhttp-chunked xhttp-request-response); PROTOCOL_TCP_PORTS+=(8080) ;;
     4) PROTOCOL_TAGS+=(shadowsocks); PROTOCOL_TCP_PORTS+=(8388); PROTOCOL_UDP_PORTS+=(8388) ;;
     6) ENABLE_OPENVPN=true; PROTOCOL_UDP_PORTS+=(1194) ;;
+    7) PROTOCOL_TAGS+=(trojan-ws) ;;
+    8) PROTOCOL_TAGS+=(vmess-ws) ;;
+    9) PROTOCOL_TAGS+=(ssh-ws) ;;
   esac
 done
 if [[ ${#PROTOCOL_OPTIONS[@]} -eq 1 && "${PROTOCOL_OPTIONS[0]}" == "6" ]]; then
@@ -732,17 +737,33 @@ if [[ "$ENABLE_OPENVPN" == "true" ]]; then
 fi
 
 PROTOCOL_UUID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+VMESS_UUID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 SHADOWSOCKS_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+TROJAN_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+SSH_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 PROTOCOL_CONFIG_FILE="$(mktemp)"
 chmod 0600 "$PROTOCOL_CONFIG_FILE"
 PROTOCOL_TAGS_JSON="$(json_array "${PROTOCOL_TAGS[@]}")"
-python3 - "$PROTOCOL_TAGS_JSON" "$PROTOCOL_UUID" "$SHADOWSOCKS_PASSWORD" \
-  "$PROTOCOL_CONFIG_FILE" proxies/xray/config.json <<'PY'
+SSH_CONFIG_PASSWORD=""
+if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 9 "* ]]; then SSH_CONFIG_PASSWORD="$SSH_PASSWORD"; fi
+PROTOCOL_TAGS_JSON="$PROTOCOL_TAGS_JSON" \
+VLESS_UUID="$PROTOCOL_UUID" \
+VMESS_UUID="$VMESS_UUID" \
+SHADOWSOCKS_PASSWORD="$SHADOWSOCKS_PASSWORD" \
+TROJAN_PASSWORD="$TROJAN_PASSWORD" \
+SSH_PASSWORD="$SSH_CONFIG_PASSWORD" \
+python3 - "$PROTOCOL_CONFIG_FILE" proxies/xray/config.json <<'PY'
 import json
+import os
 import sys
 
-enabled_tags = set(json.loads(sys.argv[1]))
-vless_uuid, shadowsocks_password, output_path, template_path = sys.argv[2:]
+enabled_tags = set(json.loads(os.environ["PROTOCOL_TAGS_JSON"]))
+vless_uuid = os.environ["VLESS_UUID"]
+vmess_uuid = os.environ["VMESS_UUID"]
+shadowsocks_password = os.environ["SHADOWSOCKS_PASSWORD"]
+trojan_password = os.environ["TROJAN_PASSWORD"]
+ssh_password = os.environ["SSH_PASSWORD"]
+output_path, template_path = sys.argv[1:]
 with open(template_path, encoding="utf-8") as source:
     config = json.load(source)
 config["inbounds"] = [
@@ -754,10 +775,20 @@ for inbound in config["inbounds"]:
     if inbound["protocol"] == "vless":
         for client in settings["clients"]:
             client["id"] = vless_uuid
+    elif inbound["protocol"] == "vmess":
+        for client in settings["clients"]:
+            client["id"] = vmess_uuid
     elif inbound["protocol"] == "shadowsocks":
         settings["password"] = shadowsocks_password
+    elif inbound["protocol"] == "trojan":
+        for client in settings["clients"]:
+            client["password"] = trojan_password
 with open(output_path, "w", encoding="utf-8") as destination:
-    json.dump(config, destination, indent=2)
+    json.dump(
+        {"xray_config": config, "ssh_password": ssh_password},
+        destination,
+        indent=2,
+    )
     destination.write("\n")
 PY
 
@@ -917,6 +948,19 @@ if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 4 "* ]]; then
   printf '  Shadowsocks: %s:8388 (TCP and UDP), method chacha20-ietf-poly1305\n  Shadowsocks password: %s\n' \
     "$RELAY_DOMAIN" "$SHADOWSOCKS_PASSWORD"
 fi
+if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 7 "* ]]; then
+  printf '  Trojan over TLS/WebSocket: %s:443, path /trojan-ws\n  Trojan password: %s\n' \
+    "$RELAY_DOMAIN" "$TROJAN_PASSWORD"
+fi
+if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 8 "* ]]; then
+  printf '  VMess over TLS/WebSocket: %s:443, path /vmess-ws\n  VMess client ID (UUID): %s\n' \
+    "$RELAY_DOMAIN" "$VMESS_UUID"
+fi
+if [[ " ${PROTOCOL_OPTIONS[*]} " == *" 9 "* ]]; then
+  printf '  SSH over TLS/WebSocket: %s:443, path /ssh-ws (install websocat for the SSH client)\n' "$RELAY_DOMAIN"
+  printf '  SSH username: xgcpx\n  SSH password: %s\n' "$SSH_PASSWORD"
+  printf '  SSH command: ssh -o "ProxyCommand=websocat -E wss://%s/ssh-ws" xgcpx@%s\n' "$RELAY_DOMAIN" "$RELAY_DOMAIN"
+fi
 if [[ "$ENABLE_OPENVPN" == "true" ]]; then
   OPENVPN_CLIENT_CONFIG="${PWD}/openvpn-client-${DEPLOY_TAG}.ovpn"
   {
@@ -938,5 +982,5 @@ if [[ "$ENABLE_OPENVPN" == "true" ]]; then
   printf '  OpenVPN client profile: %s (private file, mode 0600)\n' "$OPENVPN_CLIENT_CONFIG"
 fi
 printf 'Selected protocols: %s\n' "${PROTOCOL_OPTIONS[*]}"
-warn "Store printed credentials and the OpenVPN profile securely. No public SSH/password or SSH-over-WebSocket service is configured."
+warn "Store printed credentials and the OpenVPN profile securely. SSH-over-WebSocket, when selected, is a password-authenticated VM service, not a Cloud Run feature."
 warn "The protocol VM IP is a separate endpoint, not the Cloud Run load-balancer IP. Cloud Run cannot relay raw OpenVPN UDP."

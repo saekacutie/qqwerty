@@ -25,19 +25,60 @@ while [ "$attempt" -lt 12 ]; do
   sleep 5
 done
 [ -n "$secret_json" ] || { printf '%s\n' "Unable to read the protocol config from Secret Manager." >&2; exit 1; }
-printf '%s' "$secret_json" | python3 -c \
-  'import base64,json,sys; sys.stdout.buffer.write(base64.b64decode(json.load(sys.stdin)["payload"]["data"]))' \
-  > /tmp/xray-config.json
+printf '%s' "$secret_json" | python3 -c '
+import base64
+import json
+import os
+import sys
+
+payload = json.loads(base64.b64decode(json.load(sys.stdin)["payload"]["data"]))
+with open("/tmp/xray-config.json", "w", encoding="utf-8") as config_file:
+    json.dump(payload["xray_config"], config_file)
+password = payload.get("ssh_password", "")
+if password:
+    os.makedirs("/run/xgcpx", exist_ok=True)
+    fd = os.open("/run/xgcpx/ssh-password", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as password_file:
+        password_file.write(password)
+'
 unset token_json access_token secret_json
+chown 10001:10001 /tmp/xray-config.json
+chmod 0600 /tmp/xray-config.json
 
 xray run -test -config /tmp/xray-config.json
-xray run -config /tmp/xray-config.json &
+sshd_pid=""
+if [ -s /run/xgcpx/ssh-password ]; then
+  if ! id xgcpx >/dev/null 2>&1; then
+    adduser -D -s /bin/sh xgcpx
+  fi
+  printf 'xgcpx:' > /run/xgcpx/chpasswd
+  cat /run/xgcpx/ssh-password >> /run/xgcpx/chpasswd
+  printf '\n' >> /run/xgcpx/chpasswd
+  chpasswd < /run/xgcpx/chpasswd
+  rm -f /run/xgcpx/ssh-password /run/xgcpx/chpasswd
+  mkdir -p /run/sshd
+  ssh-keygen -A
+  /usr/sbin/sshd -t
+  /usr/sbin/sshd -D -e &
+  sshd_pid=$!
+fi
+
+su-exec 10001:10001 xray run -config /tmp/xray-config.json &
 xray_pid=$!
-caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
+su-exec 10001:10001 caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
 caddy_pid=$!
-trap 'kill "$xray_pid" "$caddy_pid" 2>/dev/null || true' EXIT HUP INT TERM
+stop_services() {
+  kill "$xray_pid" "$caddy_pid" 2>/dev/null || true
+  if [ -n "$sshd_pid" ]; then
+    kill "$sshd_pid" 2>/dev/null || true
+  fi
+}
+trap stop_services EXIT HUP INT TERM
 
 while kill -0 "$xray_pid" 2>/dev/null && kill -0 "$caddy_pid" 2>/dev/null; do
+  if [ -n "$sshd_pid" ] && ! kill -0 "$sshd_pid" 2>/dev/null; then
+    break
+  fi
   sleep 2
 done
 

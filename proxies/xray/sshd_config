@@ -1,0 +1,17 @@
+Port 22
+AddressFamily inet
+ListenAddress 127.0.0.1
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+PermitRootLogin no
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+AllowUsers xgcpx
+AllowTcpForwarding local
+AllowAgentForwarding no
+X11Forwarding no
+PermitTunnel no
+PrintMotd no
+MaxAuthTries 3
+LoginGraceTime 30
+Subsystem sftp internal-sftp
