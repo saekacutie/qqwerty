@@ -1,0 +1,49 @@
+http:
+  middlewares:
+    gateway-headers:
+      headers:
+        customResponseHeaders:
+          X-Server-Status: "200"
+          X-Content-Type-Options: "nosniff"
+    retry-upstream:
+      retry:
+        attempts: 3
+        initialInterval: "100ms"
+    asset-cache:
+      headers:
+        customResponseHeaders:
+          Cache-Control: "public, max-age=300, stale-while-revalidate=30"
+  routers:
+    health:
+      rule: Path(`/healthz`)
+      service: ping@internal
+      middlewares: [gateway-headers]
+    grpc:
+      # Match standard gRPC requests regardless of their /package.Service/Method path.
+      rule: HeadersRegexp(`Content-Type`, `^application/grpc`)
+      priority: 100
+      service: api-pool
+      middlewares: [gateway-headers]
+    api:
+      rule: PathPrefix(`/api/`)
+      service: api-pool
+      middlewares: [gateway-headers, retry-upstream]
+    assets:
+      rule: PathPrefix(`/assets/`)
+      service: api-pool
+      middlewares: [gateway-headers, asset-cache]
+    fallback:
+      rule: PathPrefix(`/`)
+      service: api-pool
+      middlewares: [gateway-headers]
+  services:
+    api-pool:
+      loadBalancer:
+        servers:
+          - url: "${UPSTREAM_PRIMARY}"
+          - url: "${UPSTREAM_FALLBACK}"
+        passHostHeader: true
+        healthCheck:
+          path: /healthz
+          interval: "5s"
+          timeout: "2s"

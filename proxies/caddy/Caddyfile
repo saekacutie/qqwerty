@@ -1,0 +1,65 @@
+{
+	admin off
+	auto_https off
+	servers {
+		protocols h1 h2 h2c
+	}
+}
+
+# The load balancer terminates public TLS/HTTP3; this listener serves HTTP/1.1 and HTTP/2 upstream.
+:8080 {
+	log {
+		output stdout
+		format json
+	}
+	header X-Server-Status "200"
+	header X-Content-Type-Options "nosniff"
+	@health path /healthz
+	handle @health {
+		header Cache-Control "no-store"
+		respond `{"status":"ok"}` 200
+	}
+	# reverse_proxy handles WebSocket upgrades; immediate flushing supports streaming responses.
+	@api path /api/*
+	handle @api {
+		reverse_proxy {$UPSTREAM_PRIMARY} {$UPSTREAM_FALLBACK} {
+			lb_policy first
+			health_uri /healthz
+			health_interval 10s
+			lb_try_duration 3s
+			flush_interval -1
+		}
+	}
+	@grpc header Content-Type application/grpc*
+	handle @grpc {
+		reverse_proxy {$UPSTREAM_PRIMARY} {$UPSTREAM_FALLBACK} {
+			lb_policy first
+			health_uri /healthz
+			health_interval 10s
+			lb_try_duration 3s
+		}
+	}
+	@persistent path /persistent/*
+	handle @persistent {
+		reverse_proxy {$UPSTREAM_PRIMARY} {$UPSTREAM_FALLBACK} {
+			lb_policy first
+			health_uri /healthz
+			health_interval 10s
+			lb_try_duration 3s
+			flush_interval -1
+		}
+	}
+	@assets path /assets/*
+	handle @assets {
+		header Cache-Control "public, max-age=300, stale-while-revalidate=30"
+		reverse_proxy {$UPSTREAM_PRIMARY} {$UPSTREAM_FALLBACK} {
+			lb_policy first
+			health_uri /healthz
+			health_interval 10s
+		}
+	}
+	handle {
+		header Cache-Control "no-store"
+		respond `{"service":"xgcpx","status":"ready"}` 200
+	}
+}

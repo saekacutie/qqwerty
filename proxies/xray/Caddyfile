@@ -1,0 +1,54 @@
+{
+	admin off
+	auto_https disable_redirects
+	http_port 8080
+	https_port 8443
+}
+
+http://{$RELAY_DOMAIN} {
+	redir https://{$RELAY_DOMAIN}{uri} permanent
+}
+
+{$RELAY_DOMAIN} {
+	@grpc header Content-Type application/grpc*
+	reverse_proxy @grpc h2c://127.0.0.1:10003
+
+	@vless_ws path /vless-ws
+	reverse_proxy @vless_ws 127.0.0.1:10001
+
+	@vless_httpupgrade path /vless-httpupgrade
+	reverse_proxy @vless_httpupgrade 127.0.0.1:10002
+
+	@xhttp_packet path /xhttp-packet*
+	reverse_proxy @xhttp_packet 127.0.0.1:10004
+
+	@xhttp_chunked path /xhttp-chunked*
+	reverse_proxy @xhttp_chunked 127.0.0.1:10005
+
+	@xhttp_request_response path /xhttp-request-response*
+	reverse_proxy @xhttp_request_response 127.0.0.1:10006
+
+	handle {
+		respond "not found" 404
+	}
+}
+
+https://{$RELAY_DOMAIN}:8081 {
+	@xhttp_packet path /xhttp-packet*
+	reverse_proxy @xhttp_packet 127.0.0.1:10004
+	@xhttp_chunked path /xhttp-chunked*
+	reverse_proxy @xhttp_chunked 127.0.0.1:10005
+	@xhttp_request_response path /xhttp-request-response*
+	reverse_proxy @xhttp_request_response 127.0.0.1:10006
+	handle {
+		respond "not found" 404
+	}
+}
+
+https://{$RELAY_DOMAIN}:50052 {
+	@grpc header Content-Type application/grpc*
+	reverse_proxy @grpc h2c://127.0.0.1:10003
+	handle {
+		respond "not found" 404
+	}
+}

@@ -1,0 +1,84 @@
+log_format xgcpx escape=json '{"time":"$time_iso8601","request_id":"$request_id","remote_addr":"$remote_addr","method":"$request_method","uri":"$request_uri","status":$status,"request_time":$request_time}';
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    '' "";
+}
+# Keep idle upstream connections available for reuse; the map above still upgrades WebSockets.
+upstream xgcpx_api {
+    server ${UPSTREAM_PRIMARY_HOST} max_fails=2 fail_timeout=5s;
+    server ${UPSTREAM_FALLBACK_HOST} backup;
+    keepalive 64;
+}
+server {
+    listen 8080;
+    http2 on;
+    access_log /dev/stdout xgcpx;
+    error_log /dev/stderr warn;
+    # Keep upgraded/streaming requests alive; align with Cloud Run and backend timeouts.
+    proxy_connect_timeout 10s;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    proxy_socket_keepalive on;
+    send_timeout 3600s;
+    add_header X-Server-Status "200" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    error_page 418 = @grpc;
+    location = /healthz { access_log off; add_header Cache-Control "no-store"; return 200 '{"status":"ok"}'; }
+    location /assets/ {
+        add_header Cache-Control "public, max-age=300, stale-while-revalidate=30" always;
+        proxy_pass https://xgcpx_api;
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${UPSTREAM_PRIMARY_HOST};
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_set_header Host ${UPSTREAM_PRIMARY_HOST};
+    }
+    location /persistent/ {
+        proxy_pass https://xgcpx_api;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${UPSTREAM_PRIMARY_HOST};
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_set_header Host ${UPSTREAM_PRIMARY_HOST};
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_next_upstream error timeout http_502 http_503 http_504;
+    }
+    location /api/ {
+        if ($http_content_type ~* "^application/grpc") { return 418; }
+        proxy_pass https://xgcpx_api;
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${UPSTREAM_PRIMARY_HOST};
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_http_version 1.1;
+        proxy_set_header Host ${UPSTREAM_PRIMARY_HOST};
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_next_upstream error timeout http_502 http_503 http_504;
+    }
+    location @grpc {
+        grpc_pass grpcs://xgcpx_api;
+        grpc_connect_timeout 10s;
+        grpc_read_timeout 3600s;
+        grpc_send_timeout 3600s;
+        grpc_socket_keepalive on;
+        grpc_ssl_server_name on;
+        grpc_ssl_name ${UPSTREAM_PRIMARY_HOST};
+        grpc_ssl_verify on;
+        grpc_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        grpc_set_header Host ${UPSTREAM_PRIMARY_HOST};
+        grpc_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        grpc_next_upstream error timeout;
+    }
+    location / {
+        # gRPC methods use /package.Service/Method paths, not necessarily /api/.
+        if ($http_content_type ~* "^application/grpc") { return 418; }
+        add_header Cache-Control "no-store";
+        return 200 '{"service":"xgcpx","status":"ready"}';
+    }
+}

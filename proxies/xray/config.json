@@ -1,0 +1,108 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "vless-ws",
+      "listen": "127.0.0.1",
+      "port": 10001,
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "__VLESS_UUID__" }],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": { "path": "/vless-ws" }
+      }
+    },
+    {
+      "tag": "vless-httpupgrade",
+      "listen": "127.0.0.1",
+      "port": 10002,
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "__VLESS_UUID__" }],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "httpupgrade",
+        "httpupgradeSettings": { "path": "/vless-httpupgrade" }
+      }
+    },
+    {
+      "tag": "vless-grpc",
+      "listen": "127.0.0.1",
+      "port": 10003,
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "__VLESS_UUID__" }],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "grpc",
+        "grpcSettings": { "serviceName": "vless-grpc" }
+      }
+    },
+    {
+      "tag": "xhttp-packet",
+      "listen": "127.0.0.1",
+      "port": 10004,
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "__VLESS_UUID__" }],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": { "path": "/xhttp-packet", "mode": "packet-up" }
+      }
+    },
+    {
+      "tag": "xhttp-chunked",
+      "listen": "127.0.0.1",
+      "port": 10005,
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "__VLESS_UUID__" }],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": { "path": "/xhttp-chunked", "mode": "stream-up" }
+      }
+    },
+    {
+      "tag": "xhttp-request-response",
+      "listen": "127.0.0.1",
+      "port": 10006,
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "__VLESS_UUID__" }],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": { "path": "/xhttp-request-response", "mode": "stream-one" }
+      }
+    },
+    {
+      "tag": "shadowsocks",
+      "listen": "0.0.0.0",
+      "port": 8388,
+      "protocol": "shadowsocks",
+      "settings": {
+        "method": "chacha20-ietf-poly1305",
+        "password": "__SHADOWSOCKS_PASSWORD__",
+        "network": "tcp,udp"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    }
+  ]
+}

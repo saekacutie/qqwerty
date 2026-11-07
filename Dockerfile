@@ -1,55 +1,13 @@
-FROM ubuntu:22.04
-ENV DEBIAN_FRONTEND=noninteractive
+# Track Caddy's v2 major line on Alpine; this is a major-version tag, not an immutable patch pin.
+FROM caddy:2-alpine
 
-RUN apt-get update && apt-get install -y \
-    openssh-server python3 cmake build-essential git wget curl ca-certificates \
-    debian-keyring debian-archive-keyring apt-transport-https gnupg \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+ENV UPSTREAM_PRIMARY=http://127.0.0.1:8081 \
+    UPSTREAM_FALLBACK=http://127.0.0.1:8081
 
-# Install Caddy (official Cloudsmith apt repo)
-RUN curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
-    && curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list \
-    && apt-get update && apt-get install -y caddy \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# Build BadVPN UDPGW for Gaming UDP Support
-RUN git clone https://github.com/ambrop72/badvpn.git /tmp/badvpn \
-    && cd /tmp/badvpn && mkdir build && cd build \
-    && cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 \
-    && make install && rm -rf /tmp/badvpn
-
-# Setup SSH and User
-RUN mkdir -p /var/run/sshd
-# FIXED: this previously created a user named "saeka" but set a password for
-# "master" - chpasswd fails on a nonexistent user, which broke the entire
-# Docker build at this step. Now creates the same user the credentials
-# actually advertise.
-# NOTE: no password baked into the image. entrypoint.sh generates a strong
-# password at container start (override with SSH_PASSWORD env var).
-RUN useradd -m -s /bin/bash saeka && passwd -l saeka
-RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-RUN sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-
-# Stability/perf tuning: skip reverse-DNS on connect (removes real handshake delay),
-# keep idle sessions alive instead of dropping them, and raise multiplexing ceilings
-# so many parallel channels (typical for gaming/streaming tunnels) don't get throttled.
-RUN { \
-    echo "UseDNS no"; \
-    echo "TCPKeepAlive yes"; \
-    echo "ClientAliveInterval 15"; \
-    echo "ClientAliveCountMax 3"; \
-    echo "MaxSessions 50"; \
-    echo "MaxStartups 50:30:100"; \
-    echo "Compression no"; \
-    } >> /etc/ssh/sshd_config
-
-# Add Custom Aesthetic Banner
-COPY banner.txt /etc/ssh/banner.txt
-RUN echo "Banner /etc/ssh/banner.txt" >> /etc/ssh/sshd_config
-
-COPY Caddyfile /etc/caddy/Caddyfile
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
+COPY proxies/caddy/Caddyfile /etc/caddy/Caddyfile
 EXPOSE 8080
-ENTRYPOINT ["/entrypoint.sh"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+# Keep the legacy relay script separate; this image contains only the Caddy gateway.
+ENTRYPOINT ["caddy"]
+CMD ["run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

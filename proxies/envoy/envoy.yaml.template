@@ -1,0 +1,124 @@
+static_resources:
+  listeners:
+    - name: http_listener
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8080 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: xgcpx_http
+                codec_type: AUTO
+                internal_address_config: {}
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format: { method: "%REQ(:METHOD)%", path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%", status: "%RESPONSE_CODE%", duration_ms: "%DURATION%" }
+                upgrade_configs: [{ upgrade_type: websocket }]
+                route_config:
+                  name: xgcpx_routes
+                  virtual_hosts:
+                    - name: gateway
+                      domains: ["*"]
+                      response_headers_to_add:
+                        - header: { key: X-Server-Status, value: "200" }
+                      routes:
+                        - match: { path: /healthz }
+                          direct_response: { status: 200, body: { inline_string: '{"status":"ok"}' } }
+                        - match: { prefix: /assets/ }
+                          response_headers_to_add:
+                            - header: { key: Cache-Control, value: "public, max-age=300" }
+                          route: { cluster: api_upstream, timeout: 30s }
+                        - match: { prefix: /api/ }
+                          route: { cluster: api_upstream, timeout: 30s }
+                        - match: { prefix: / }
+                          route: { cluster: api_upstream, timeout: 30s }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+    - name: tcp_listener
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 9000 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.tcp_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                stat_prefix: xgcpx_tcp
+                idle_timeout: 86400s
+                cluster: tcp_upstream
+    - name: tls_passthrough_listener
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 9443 }
+      listener_filters:
+        - name: envoy.filters.listener.tls_inspector
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+      filter_chains:
+        - filter_chain_match: { transport_protocol: tls }
+          filters:
+            - name: envoy.filters.network.tcp_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                stat_prefix: xgcpx_tls_passthrough
+                idle_timeout: 86400s
+                cluster: tls_upstream
+  clusters:
+    - name: api_upstream
+      type: STRICT_DNS
+      connect_timeout: 5s
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      health_checks:
+        - timeout: 3s
+          interval: 10s
+          unhealthy_threshold: 2
+          healthy_threshold: 2
+          http_health_check: { path: /healthz }
+      load_assignment:
+        cluster_name: api_upstream
+        endpoints:
+          - priority: 0
+            lb_endpoints:
+              - endpoint: { address: { socket_address: { address: "${PRIMARY_HOST}", port_value: ${PRIMARY_PORT} } } }
+          - priority: 1
+            lb_endpoints:
+              - endpoint: { address: { socket_address: { address: "${FALLBACK_HOST}", port_value: ${FALLBACK_PORT} } } }
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: "${PRIMARY_HOST}"
+          common_tls_context:
+            validation_context:
+              trusted_ca:
+                filename: /etc/ssl/certs/ca-certificates.crt
+              match_typed_subject_alt_names:
+                - san_type: DNS
+                  matcher: { exact: "${PRIMARY_HOST}" }
+    - name: tcp_upstream
+      type: STRICT_DNS
+      connect_timeout: 5s
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: tcp_upstream
+        endpoints:
+          - lb_endpoints:
+              - endpoint: { address: { socket_address: { address: "${TCP_HOST}", port_value: ${TCP_PORT} } } }
+    - name: tls_upstream
+      type: STRICT_DNS
+      connect_timeout: 5s
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: tls_upstream
+        endpoints:
+          - lb_endpoints:
+              - endpoint: { address: { socket_address: { address: "${TLS_HOST}", port_value: ${TLS_PORT} } } }

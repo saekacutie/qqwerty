@@ -1,0 +1,16 @@
+entryPoints:
+  web:
+    address: ":8080"
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
+    watch: true
+accessLog:
+  format: json
+  fields:
+    defaultMode: keep
+api:
+  dashboard: false
+ping:
+  entryPoint: web
+  manualRouting: true

@@ -1,0 +1,26 @@
+spec:
+  containers:
+    - name: xgcpx-gateway
+      image: "${image}"
+      stdin: false
+      tty: false
+      env:
+        - name: UPSTREAM_PRIMARY
+          value: "${upstream_primary}"
+        - name: UPSTREAM_FALLBACK
+          value: "${upstream_fallback}"
+        - name: TCP_UPSTREAM_HOST
+          value: "${tcp_upstream_host}"
+        - name: TLS_UPSTREAM_HOST
+          value: "${tls_upstream_host}"
+      ports:
+        - name: http
+          hostPort: 8080
+          containerPort: 8080
+        - name: tcp
+          hostPort: 9000
+          containerPort: 9000
+        - name: tls-passthrough
+          hostPort: 9443
+          containerPort: 9443
+  restartPolicy: Always
