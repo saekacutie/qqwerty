@@ -2,8 +2,9 @@ FROM debian:bookworm-slim
 
 ARG DEBIAN_FRONTEND=noninteractive
 
+# iproute2 provides the `ip` command used by openvpn-up.sh.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl iptables openvpn python3 \
+    && apt-get install -y --no-install-recommends ca-certificates curl iproute2 iptables openvpn python3 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY proxies/openvpn/server.conf /etc/openvpn/server.conf
