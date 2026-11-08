@@ -1,0 +1,82 @@
+http:
+  middlewares:
+    gateway-headers:
+      headers:
+        customResponseHeaders:
+          X-Server-Status: "200"
+          X-Content-Type-Options: "nosniff"
+    asset-cache:
+      headers:
+        customResponseHeaders:
+          Cache-Control: "public, max-age=300, stale-while-revalidate=30"
+    # Only for plain request/response routes: retry buffers the request body, which would break streaming tunnels.
+    api-retry:
+      retry:
+        attempts: 3
+        initialInterval: 100ms
+  routers:
+    health:
+      rule: Path(`/healthz`)
+      priority: 2000
+      service: ping@internal
+      middlewares: [gateway-headers]
+    # HTTP/2 routes: xHTTP and gRPC tunnels need full-duplex streaming.
+    protocol-h2:
+      rule: PathPrefix(`/vless-grpc/`) || PathPrefix(`/xhttp-`)
+      priority: 1000
+      service: protocol-h2-pool
+      middlewares: [gateway-headers]
+    # HTTP/1.1 routes: WebSocket and HTTPUpgrade cannot be upgraded over h2c.
+    protocol-http:
+      rule: PathPrefix(`/vless-ws`) || PathPrefix(`/vless-httpupgrade`) || PathPrefix(`/trojan-ws`) || PathPrefix(`/trojan-httpupgrade`) || PathPrefix(`/vmess-ws`) || PathPrefix(`/ssh-ws`)
+      priority: 1000
+      service: protocol-pool
+      middlewares: [gateway-headers]
+    grpc:
+      # Match standard gRPC requests regardless of their /package.Service/Method path.
+      rule: HeaderRegexp(`Content-Type`, `^application/grpc`)
+      priority: 100
+      service: grpc-pool
+      middlewares: [gateway-headers]
+    api:
+      rule: PathPrefix(`/api/`)
+      priority: 30
+      service: api-pool
+      middlewares: [gateway-headers, api-retry]
+    assets:
+      rule: PathPrefix(`/assets/`)
+      priority: 30
+      service: api-pool
+      middlewares: [gateway-headers, asset-cache, api-retry]
+    fallback:
+      rule: PathPrefix(`/`)
+      priority: 1
+      service: api-pool
+      middlewares: [gateway-headers, api-retry]
+  services:
+    api-pool:
+      loadBalancer:
+        servers:
+          ${API_SERVERS}
+        passHostHeader: false
+    grpc-pool:
+      loadBalancer:
+        servers:
+          ${GRPC_SERVERS}
+        passHostHeader: false
+        responseForwarding:
+          flushInterval: 1ms
+    protocol-pool:
+      loadBalancer:
+        servers:
+          - url: "${PROTOCOL_UPSTREAM}"
+        passHostHeader: false
+        responseForwarding:
+          flushInterval: 1ms
+    protocol-h2-pool:
+      loadBalancer:
+        servers:
+          - url: "${PROTOCOL_H2_UPSTREAM}"
+        passHostHeader: false
+        responseForwarding:
+          flushInterval: 1ms
