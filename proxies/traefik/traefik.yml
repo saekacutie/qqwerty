@@ -1,16 +1,29 @@
+
 entryPoints:
   web:
     address: ":8080"
+    transport:
+      respondingTimeouts:
+        readTimeout: 0s
+        writeTimeout: 0s
+        idleTimeout: 180s
+
 providers:
   file:
     filename: /etc/traefik/dynamic.yml
     watch: true
+
 accessLog:
   format: json
   fields:
     defaultMode: keep
+
 api:
   dashboard: false
+
 ping:
   entryPoint: web
   manualRouting: true
+
+log:
+  level: INFO
