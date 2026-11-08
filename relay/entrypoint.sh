@@ -17,12 +17,15 @@ supervise() {
 
 echo "[+] Setting SSH credentials..."
 if [ -z "${SSH_PASSWORD:-}" ]; then
-  if [ "${ALLOW_PASSWORD_IN_LOGS:-false}" != "true" ]; then
-    echo "[!] SSH_PASSWORD is not set. Provide it (ideally from Secret Manager), or set ALLOW_PASSWORD_IN_LOGS=true to generate one and print it to the logs." >&2
+  # Cloud Run does not pass SSH_PASSWORD, so exiting here would stop the revision from ever becoming ready.
+  # Set REQUIRE_SSH_PASSWORD=true to make a missing password fatal instead.
+  if [ "${REQUIRE_SSH_PASSWORD:-false}" = "true" ]; then
+    echo "[!] SSH_PASSWORD is not set and REQUIRE_SSH_PASSWORD=true." >&2
     exit 1
   fi
   SSH_PASSWORD="$(python3 -c 'import secrets, string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(20)))')"
   echo "[+] Generated password for user 'saeka': ${SSH_PASSWORD}"
+  echo "[+] (override with the SSH_PASSWORD environment variable)"
 fi
 printf 'saeka:%s\n' "${SSH_PASSWORD}" | chpasswd
 unset SSH_PASSWORD

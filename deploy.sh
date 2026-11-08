@@ -1631,9 +1631,100 @@ if [[ "$USE_CLOUD_RUN_HOST" == "true" ]]; then
     fi
     DOMAIN="$ACTUAL_HOST"
   else
-    warn "Could not read the Cloud Run URL; falling back to the predicted host ${DOMAIN}."
+    fail "Could not read the Cloud Run URL from Terraform or gcloud, so the service may not exist. Check: gcloud run services list --region=${REGION} --project=${PROJECT_ID}"
   fi
 fi
+
+# ---------------------------------------------------------------------------------------------
+# Post-apply verification. "terraform apply finished" does not prove Cloud Run is serving traffic.
+# ---------------------------------------------------------------------------------------------
+# Prints: ready|notready ; latest created revision ; latest ready revision ; service URL ; condition message
+cloud_run_status() {
+  gcloud run services describe "$SERVICE_NAME" --region="$REGION" --project="$PROJECT_ID" --format=json 2>/dev/null \
+    | python3 -c '
+import json
+import sys
+
+try:
+    service = json.load(sys.stdin)
+except ValueError:
+    raise SystemExit(1)
+status = service.get("status", {})
+ready = next((c for c in status.get("conditions", []) if c.get("type") == "Ready"), {})
+ok = str(ready.get("status", "")).lower() == "true"
+message = (ready.get("message") or ready.get("reason") or "").replace("\n", " ").replace("|", "/")
+print("|".join([
+    "ready" if ok else "notready",
+    status.get("latestCreatedRevisionName", ""),
+    status.get("latestReadyRevisionName", ""),
+    status.get("url", ""),
+    message,
+]))
+'
+}
+
+show_cloud_run_logs() {
+  printf '%sRecent Cloud Run warnings and errors for %s:%s\n' "$BOLD" "$SERVICE_NAME" "$RESET" >&2
+  gcloud logging read \
+    "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE_NAME}\" AND severity>=WARNING" \
+    --project="$PROJECT_ID" --limit=15 --freshness=30m \
+    --format='value(timestamp,severity,textPayload,jsonPayload.message,httpRequest.status)' 2>&1 | sed 's/^/    /' >&2 || true
+}
+
+verify_cloud_run() {
+  local row state="" created="" ready_rev="" url="" message="" attempt=0 code=""
+  info "Verifying that Cloud Run is really serving ${SERVICE_NAME} (not just that Terraform finished)..."
+  while ((attempt < 24)); do
+    row="$(cloud_run_status || true)"
+    if [[ -n "$row" ]]; then
+      IFS='|' read -r state created ready_rev url message <<<"$row"
+      if [[ "$state" == "ready" && -n "$created" && "$created" == "$ready_rev" ]]; then break; fi
+    fi
+    attempt=$((attempt + 1))
+    sleep 5
+  done
+  if [[ "$state" != "ready" || -z "$created" || "$created" != "$ready_rev" ]]; then
+    printf '%s%s ERROR%s Terraform finished, but Cloud Run is NOT serving this deployment.\n' "$RED" "$SYM_ERR" "$RESET" >&2
+    printf '  Service ready:           %s\n  Latest created revision: %s\n  Latest ready revision:   %s\n  Reason:                  %s\n' \
+      "${state:-unknown}" "${created:-none}" "${ready_rev:-none}" "${message:-no message returned}" >&2
+    show_cloud_run_logs
+    fail "Fix the cause above, then re-run. Typical causes: a container exiting at start-up, the gateway not listening on port 8080, or a sidecar failing its start-up probe."
+  fi
+  success "Revision ${ready_rev} is Ready and is the latest revision."
+
+  if [[ "$USE_CLOUD_RUN_HOST" == "true" ]]; then
+    [[ -n "$url" ]] || fail "Cloud Run reported no service URL."
+    attempt=0
+    while ((attempt < 12)); do
+      code="$(curl --silent --output /dev/null --write-out '%{http_code}' --connect-timeout 5 --max-time 15 "${url}/healthz" || true)"
+      if [[ "$code" == "200" ]]; then break; fi
+      attempt=$((attempt + 1))
+      sleep 5
+    done
+    if [[ "$code" != "200" ]]; then
+      printf '%s%s ERROR%s GET %s/healthz returned HTTP %s (expected 200).\n' "$RED" "$SYM_ERR" "$RESET" "$url" "${code:-000}" >&2
+      case "$code" in
+        403) printf '  Cloud Run refused the request. The public invoker binding (allUsers) is probably missing or blocked by an organization policy (iam.allowedPolicyMemberDomains).\n  Check: gcloud run services get-iam-policy %s --region=%s --project=%s\n' "$SERVICE_NAME" "$REGION" "$PROJECT_ID" >&2 ;;
+        5??) printf '  The container is up but failing. The gateway may be unable to reach its upstream or sidecar.\n' >&2 ;;
+        *) printf '  No usable response. Check the URL, your network, and that the gateway listens on port 8080.\n' >&2 ;;
+      esac
+      show_cloud_run_logs
+      fail "Cloud Run did not answer the health check at ${url}/healthz."
+    fi
+    success "GET ${url}/healthz returned 200 (verified from this machine)."
+  else
+    info "Custom-domain mode: Cloud Run only accepts traffic from the load balancer, so its own run.app URL is expected to refuse direct requests."
+    local certs
+    certs="$(gcloud compute ssl-certificates list --project="$PROJECT_ID" --filter="managed.domains:(${DOMAIN})" \
+      --format='value(name,managed.status)' 2>/dev/null || true)"
+    if [[ -n "$certs" ]]; then
+      info "Managed certificate status: ${certs} (it must reach ACTIVE; that needs ${DOMAIN} to resolve to the load balancer IP)."
+    else
+      warn "Could not read the managed certificate status for ${DOMAIN}."
+    fi
+  fi
+}
+verify_cloud_run
 PROTOCOL_IP=""
 if [[ "$ENABLE_PROTOCOL_VM" == "true" ]]; then
   PROTOCOL_IP="$(terraform -chdir=terraform output -raw protocol_gateway_ip)"
