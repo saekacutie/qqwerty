@@ -9,8 +9,13 @@ upstream xgcpx_api {
     server ${UPSTREAM_FALLBACK_HOST}:${UPSTREAM_FALLBACK_PORT} backup;
     keepalive 64;
 }
+upstream xgcpx_api {
+    server ${PRIMARY_HOST}:${PRIMARY_PORT} max_fails=2 fail_timeout=5s;
+    server ${FALLBACK_HOST}:${FALLBACK_PORT} backup;
+    keepalive 64;
+}
 upstream xgcpx_protocol {
-    server ${PROTOCOL_UPSTREAM_HOST}:${PROTOCOL_UPSTREAM_PORT};
+    server ${PROTOCOL_HOST}:${PROTOCOL_PORT};
     keepalive 32;
 }
 server {
