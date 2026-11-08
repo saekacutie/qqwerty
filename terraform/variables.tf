@@ -46,6 +46,12 @@ variable "min_instance_count" {
   }
 }
 
+variable "cloud_run_http2" {
+  description = "Serve the Cloud Run gateway port as end-to-end HTTP/2 (h2c) instead of HTTP/1.1. gRPC and xHTTP stream-up/stream-one through Cloud Run need true; WebSocket and HTTPUpgrade transports need false, because Cloud Run cannot carry them over end-to-end HTTP/2."
+  type        = bool
+  default     = true
+}
+
 variable "enable_protocol_gateway" {
   description = "Create the protocol VM (Xray on the VM, or OpenVPN-only VM when Xray runs in Cloud Run)."
   type        = bool
