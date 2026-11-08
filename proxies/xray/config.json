@@ -2,6 +2,20 @@
   "log": {
     "loglevel": "warning"
   },
+  "dns": {
+    "servers": ["localhost", "1.1.1.1", "8.8.8.8"],
+    "queryStrategy": "UseIPv4"
+  },
+  "policy": {
+    "levels": {
+      "0": {
+        "handshake": 10,
+        "connIdle": 3600,
+        "uplinkOnly": 5,
+        "downlinkOnly": 10
+      }
+    }
+  },
   "inbounds": [
     {
       "tag": "vless-ws",
@@ -9,7 +23,7 @@
       "port": 10001,
       "protocol": "vless",
       "settings": {
-        "clients": [{ "id": "__VLESS_UUID__" }],
+        "clients": [{ "id": "__VLESS_UUID__", "level": 0 }],
         "decryption": "none"
       },
       "streamSettings": {
@@ -23,7 +37,7 @@
       "port": 10002,
       "protocol": "vless",
       "settings": {
-        "clients": [{ "id": "__VLESS_UUID__" }],
+        "clients": [{ "id": "__VLESS_UUID__", "level": 0 }],
         "decryption": "none"
       },
       "streamSettings": {
@@ -37,7 +51,7 @@
       "port": 10003,
       "protocol": "vless",
       "settings": {
-        "clients": [{ "id": "__VLESS_UUID__" }],
+        "clients": [{ "id": "__VLESS_UUID__", "level": 0 }],
         "decryption": "none"
       },
       "streamSettings": {
@@ -51,7 +65,7 @@
       "port": 10004,
       "protocol": "vless",
       "settings": {
-        "clients": [{ "id": "__VLESS_UUID__" }],
+        "clients": [{ "id": "__VLESS_UUID__", "level": 0 }],
         "decryption": "none"
       },
       "streamSettings": {
@@ -65,7 +79,7 @@
       "port": 10005,
       "protocol": "vless",
       "settings": {
-        "clients": [{ "id": "__VLESS_UUID__" }],
+        "clients": [{ "id": "__VLESS_UUID__", "level": 0 }],
         "decryption": "none"
       },
       "streamSettings": {
@@ -79,7 +93,7 @@
       "port": 10006,
       "protocol": "vless",
       "settings": {
-        "clients": [{ "id": "__VLESS_UUID__" }],
+        "clients": [{ "id": "__VLESS_UUID__", "level": 0 }],
         "decryption": "none"
       },
       "streamSettings": {
@@ -95,6 +109,7 @@
       "settings": {
         "method": "chacha20-ietf-poly1305",
         "password": "__SHADOWSOCKS_PASSWORD__",
+        "level": 0,
         "network": "tcp,udp"
       }
     },
@@ -104,7 +119,7 @@
       "port": 10007,
       "protocol": "trojan",
       "settings": {
-        "clients": [{ "password": "__TROJAN_PASSWORD__" }]
+        "clients": [{ "password": "__TROJAN_PASSWORD__", "level": 0 }]
       },
       "streamSettings": {
         "network": "ws",
@@ -117,7 +132,7 @@
       "port": 10010,
       "protocol": "trojan",
       "settings": {
-        "clients": [{ "password": "__TROJAN_PASSWORD__" }]
+        "clients": [{ "password": "__TROJAN_PASSWORD__", "level": 0 }]
       },
       "streamSettings": {
         "network": "httpupgrade",
@@ -130,7 +145,7 @@
       "port": 10008,
       "protocol": "vmess",
       "settings": {
-        "clients": [{ "id": "__VMESS_UUID__", "alterId": 0, "security": "auto" }]
+        "clients": [{ "id": "__VMESS_UUID__", "level": 0 }]
       },
       "streamSettings": {
         "network": "ws",
@@ -156,7 +171,40 @@
   "outbounds": [
     {
       "tag": "direct",
-      "protocol": "freedom"
+      "protocol": "freedom",
+      "streamSettings": {
+        "sockopt": { "domainStrategy": "UseIPv4" }
+      }
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
     }
-  ]
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["ssh-ws"],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "ip": [
+          "0.0.0.0/8",
+          "10.0.0.0/8",
+          "100.64.0.0/10",
+          "127.0.0.0/8",
+          "169.254.0.0/16",
+          "172.16.0.0/12",
+          "192.168.0.0/16",
+          "::1/128",
+          "fc00::/7",
+          "fe80::/10"
+        ],
+        "outboundTag": "block"
+      }
+    ]
+  }
 }
