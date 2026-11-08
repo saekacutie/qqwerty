@@ -56,7 +56,6 @@ static_resources:
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
-
     - name: tcp_listener
       address:
         socket_address: { address: 0.0.0.0, port_value: 9000 }
@@ -68,7 +67,6 @@ static_resources:
                 stat_prefix: xgcpx_tcp
                 idle_timeout: 86400s
                 cluster: tcp_upstream
-
     - name: tls_passthrough_listener
       address:
         socket_address: { address: 0.0.0.0, port_value: 9443 }
@@ -85,12 +83,7 @@ static_resources:
                 stat_prefix: xgcpx_tls_passthrough
                 idle_timeout: 86400s
                 cluster: tls_upstream
-
   clusters:
-    # Primary (priority 0) with fallback (priority 1). Both share one transport socket,
-    # which is why the entrypoint requires the same host for https.
-    # auto_config picks HTTP/1.1 for http:// and negotiates via ALPN for https://,
-    # so plain HTTP backends are not forced into HTTP/2.
     - name: api_upstream
       type: STRICT_DNS
       connect_timeout: 5s
@@ -109,7 +102,6 @@ static_resources:
             lb_endpoints:
               - endpoint: { address: { socket_address: { address: "${FALLBACK_HOST}", port_value: ${FALLBACK_PORT} } } }
       ${UPSTREAM_TRANSPORT_SOCKET}
-
     - name: tcp_upstream
       type: STRICT_DNS
       connect_timeout: 5s
@@ -119,7 +111,6 @@ static_resources:
         endpoints:
           - lb_endpoints:
               - endpoint: { address: { socket_address: { address: "${TCP_HOST}", port_value: ${TCP_PORT} } } }
-
     - name: tls_upstream
       type: STRICT_DNS
       connect_timeout: 5s
@@ -129,8 +120,6 @@ static_resources:
         endpoints:
           - lb_endpoints:
               - endpoint: { address: { socket_address: { address: "${TLS_HOST}", port_value: ${TLS_PORT} } } }
-
-    # HTTP/1.1 for WebSocket and upgrade routes.
     - name: protocol_upstream_h1
       type: STRICT_DNS
       connect_timeout: 5s
@@ -141,8 +130,6 @@ static_resources:
           - lb_endpoints:
               - endpoint: { address: { socket_address: { address: "${PROTOCOL_HOST}", port_value: ${PROTOCOL_PORT} } } }
       ${PROTOCOL_H1_TRANSPORT_SOCKET}
-
-    # HTTP/2 for gRPC routes. Over TLS, ALPN is set to h2.
     - name: protocol_upstream_h2
       type: STRICT_DNS
       connect_timeout: 5s

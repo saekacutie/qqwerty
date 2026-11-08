@@ -6,6 +6,7 @@
 	}
 }
 
+# Regular HTTP application traffic: HTTP/1.1 to the upstream (also carries WebSocket upgrades).
 (app_upstream) {
 	reverse_proxy {$UPSTREAM_PRIMARY} {$UPSTREAM_FALLBACK} {
 		lb_policy first
@@ -13,7 +14,7 @@
 		lb_retry_match {
 			method GET HEAD
 		}
-		header_up Host {http.reverse_proxy.upstream.hostport}
+		header_up Host {http.reverse_proxy.upstream.host}
 		flush_interval -1
 		transport http {
 			versions 1.1
@@ -21,13 +22,25 @@
 	}
 }
 
-# Serves plain HTTP. The load balancer terminates public TLS/HTTP3 in front of this.
+# gRPC application traffic: needs HTTP/2 (h2c for http:// upstreams, h2 over TLS for https://).
+(app_upstream_grpc) {
+	reverse_proxy {$UPSTREAM_PRIMARY} {$UPSTREAM_FALLBACK} {
+		lb_policy first
+		lb_try_duration 3s
+		header_up Host {http.reverse_proxy.upstream.host}
+		flush_interval -1
+		transport http {
+			versions 2 h2c
+		}
+	}
+}
+
+# The load balancer terminates public TLS/HTTP3; this listener serves HTTP/1.1 and HTTP/2 upstream.
 :8080 {
 	log {
 		output stdout
 		format json
 	}
-
 	header X-Server-Status "200"
 	header X-Content-Type-Options "nosniff"
 
@@ -38,13 +51,10 @@
 		respond `{"status":"ok"}` 200
 	}
 
-	# gRPC: HTTP/2 to the protocol upstream (h2c for http://, h2 over TLS for https://).
-	@grpc {
-		path /vless-grpc/*
-	}
-	handle @grpc {
+	@protocol_grpc path /vless-grpc/*
+	handle @protocol_grpc {
 		reverse_proxy {$PROTOCOL_UPSTREAM} {
-			header_up Host {http.reverse_proxy.upstream.hostport}
+			header_up Host {$PROTOCOL_UPSTREAM_HOST}
 			flush_interval -1
 			transport http {
 				versions 2 h2c
@@ -52,11 +62,10 @@
 		}
 	}
 
-	# WebSocket and HTTP upgrade routes: HTTP/1.1 only.
 	@protocol_http path /vless-ws* /vless-httpupgrade* /xhttp-* /trojan-ws* /trojan-httpupgrade* /vmess-ws* /ssh-ws*
 	handle @protocol_http {
 		reverse_proxy {$PROTOCOL_UPSTREAM} {
-			header_up Host {http.reverse_proxy.upstream.hostport}
+			header_up Host {$PROTOCOL_UPSTREAM_HOST}
 			flush_interval -1
 			transport http {
 				versions 1.1
@@ -64,13 +73,19 @@
 		}
 	}
 
-	@api path /api/*
-	handle @api {
-		import app_upstream
+	# gRPC methods use /package.Service/Method paths, so match on Content-Type, not on path.
+	@grpc header Content-Type application/grpc*
+	handle @grpc {
+		import app_upstream_grpc
 	}
 
 	@persistent path /persistent/*
 	handle @persistent {
+		import app_upstream
+	}
+
+	@api path /api/*
+	handle @api {
 		import app_upstream
 	}
 

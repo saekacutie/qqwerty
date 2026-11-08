@@ -49,7 +49,7 @@ parse_hostport() {
 }
 
 # Emits an UpstreamTlsContext transport socket for a host.
-# $2 = "h2" adds ALPN h2 (needed for gRPC over TLS). Otherwise ALPN is left to the protocol options.
+# A second argument of "h2" adds ALPN h2 (needed for gRPC over TLS).
 tls_socket() {
   printf '%s\n' "transport_socket:"
   printf '%s\n' "        name: envoy.transport_sockets.tls"

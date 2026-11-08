@@ -9,13 +9,8 @@ upstream xgcpx_api {
     server ${UPSTREAM_FALLBACK_HOST}:${UPSTREAM_FALLBACK_PORT} backup;
     keepalive 64;
 }
-upstream xgcpx_api {
-    server ${PRIMARY_HOST}:${PRIMARY_PORT} max_fails=2 fail_timeout=5s;
-    server ${FALLBACK_HOST}:${FALLBACK_PORT} backup;
-    keepalive 64;
-}
 upstream xgcpx_protocol {
-    server ${PROTOCOL_HOST}:${PROTOCOL_PORT};
+    server ${PROTOCOL_UPSTREAM_HOST}:${PROTOCOL_UPSTREAM_PORT};
     keepalive 32;
 }
 server {
@@ -32,7 +27,7 @@ server {
     add_header X-Server-Status "200" always;
     add_header X-Content-Type-Options "nosniff" always;
     error_page 418 = @grpc;
-    location = /healthz { access_log off; add_header Cache-Control "no-store"; return 200 '{"status":"ok"}'; }
+    location = /healthz { access_log off; default_type application/json; add_header Cache-Control "no-store"; return 200 '{"status":"ok"}'; }
     location /vless-grpc/ {
         grpc_pass ${PROTOCOL_GRPC_SCHEME}://xgcpx_protocol;
         grpc_connect_timeout 10s;
@@ -62,6 +57,8 @@ server {
     location /assets/ {
         add_header Cache-Control "public, max-age=300, stale-while-revalidate=30" always;
         proxy_pass ${UPSTREAM_PRIMARY_SCHEME}://xgcpx_api;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
         proxy_ssl_server_name on;
         proxy_ssl_name ${UPSTREAM_PRIMARY_HOST};
         proxy_ssl_verify on;

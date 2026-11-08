@@ -32,10 +32,8 @@ while [ "$attempt" -lt 12 ]; do
 done
 [ -n "$secret_json" ] || { printf '%s\n' "Unable to read the OpenVPN configuration from Secret Manager." >&2; exit 1; }
 
-# /run/openvpn is owned by nobody so OpenVPN can write its status and IP pool files after dropping root.
 mkdir -p /run/openvpn
 chmod 0700 /run/openvpn
-chown nobody:nogroup /run/openvpn
 
 printf '%s' "$secret_json" | python3 -c '
 import base64
@@ -57,12 +55,17 @@ for key, filename in (
     if not isinstance(value, str) or not value:
         raise SystemExit(f"Missing OpenVPN secret field: {key}")
     path = directory / filename
-    # Create with 0600 from the start, so the key is never readable by others.
+    # Created with mode 0600 from the start, so a key is never readable by others.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="ascii") as handle:
         handle.write(value)
 '
-
 unset token_json access_token secret_json
+
+# OpenVPN drops to nobody after start-up. Files it must rewrite later (the IP pool and the
+# status log) and the directory holding them have to be owned by that user. The key files
+# stay root-owned 0600, because OpenVPN reads them before dropping privileges.
+touch /run/openvpn/ipp.txt /run/openvpn/status.log
+chown nobody:nogroup /run/openvpn /run/openvpn/ipp.txt /run/openvpn/status.log
 
 exec openvpn --config /etc/openvpn/server.conf
