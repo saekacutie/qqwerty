@@ -1254,6 +1254,8 @@ chown 10001:10001 /var/lib/xgcpx/caddy-data /var/lib/xgcpx/caddy-config
 chmod 0750 /var/lib/xgcpx/caddy-data /var/lib/xgcpx/caddy-config
 docker rm --force xgcpx-protocols >/dev/null 2>&1 || true
 docker run --detach --name xgcpx-protocols --restart always \
+  --ulimit nofile=1048576:1048576 \
+  --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
   --publish 80:8080/tcp \
   --publish 443:8443/tcp \
   --publish 8080:8081/tcp \
@@ -1273,6 +1275,7 @@ STARTUP_XRAY_EOF
 
 docker rm --force xgcpx-openvpn >/dev/null 2>&1 || true
 docker run --detach --name xgcpx-openvpn --restart always \
+  --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
   --publish 1194:1194/udp \
   --cap-add=NET_ADMIN \
   --device /dev/net/tun:/dev/net/tun \
