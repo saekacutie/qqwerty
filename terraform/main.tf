@@ -76,6 +76,14 @@ resource "google_cloud_run_v2_service" "gateway" {
     }
 
     precondition {
+      condition = startswith(var.upstream_primary, "https://") == startswith(var.upstream_fallback, "https://") && (
+        !startswith(var.upstream_primary, "https://") ||
+        split("/", trimprefix(var.upstream_primary, "https://"))[0] == split("/", trimprefix(var.upstream_fallback, "https://"))[0]
+      )
+      error_message = "upstream_primary and upstream_fallback must use the same scheme, and the same host when they use https."
+    }
+
+    precondition {
       condition     = var.backend_image != ""
       error_message = "The Cloud Run gateway requires the built-in backend sidecar image."
     }
@@ -97,8 +105,10 @@ resource "google_cloud_run_v2_service" "gateway" {
       name       = "gateway"
       image      = var.image
       depends_on = var.enable_cloudrun_protocols ? ["backend", "protocol"] : ["backend"]
+      # h2c = end-to-end HTTP/2 (gRPC, xHTTP stream-up/stream-one); http1 = HTTP/1.1, which Cloud Run
+      # requires for WebSocket and HTTPUpgrade. Every gateway image accepts both on port 8080.
       ports {
-        name           = "h2c"
+        name           = var.cloud_run_http2 ? "h2c" : "http1"
         container_port = 8080
       }
       resources {
@@ -175,6 +185,10 @@ resource "google_cloud_run_v2_service" "gateway" {
           name  = "PROTOCOL_HTTP_ONLY"
           value = "true"
         }
+        env {
+          name  = "PROTOCOL_SECRET_VERSION"
+          value = var.protocol_secret_version
+        }
         startup_probe {
           tcp_socket {
             port = 8082
@@ -200,6 +214,7 @@ resource "google_cloud_run_v2_service" "gateway" {
 }
 
 resource "google_service_account" "cloudrun_protocols" {
+  depends_on = [google_project_service.required]
   count        = var.enable_cloudrun_protocols ? 1 : 0
   account_id   = "${local.sa_prefix}-run-proto"
   display_name = "xgcpx Cloud Run protocol sidecar"
@@ -222,6 +237,7 @@ resource "google_cloud_run_v2_service_iam_member" "public_invoker" {
 }
 
 resource "google_compute_network" "gateway" {
+  depends_on = [google_project_service.required]
   name                    = "${local.prefix}-network"
   auto_create_subnetworks = false
 }
@@ -235,6 +251,7 @@ resource "google_compute_subnetwork" "gateway" {
 }
 
 resource "google_service_account" "gateway_vm" {
+  depends_on = [google_project_service.required]
   count        = local.create_gateway_vm ? 1 : 0
   account_id   = "${local.sa_prefix}-vm"
   display_name = "xgcpx persistent gateway VM"
@@ -301,12 +318,14 @@ resource "google_compute_instance_template" "gateway" {
 }
 
 data "google_compute_zones" "protocol_vm" {
+  depends_on = [google_project_service.required]
   project = var.project_id
   region  = var.region
   status  = "UP"
 }
 
 resource "google_service_account" "protocol_vm" {
+  depends_on = [google_project_service.required]
   count        = var.enable_protocol_gateway ? 1 : 0
   account_id   = "${local.sa_prefix}-proto"
   display_name = "xgcpx authenticated protocol VM"
@@ -321,6 +340,7 @@ resource "google_project_iam_member" "protocol_vm_artifact_reader" {
 
 # Only created for a real Xray secret, so an OpenVPN-only deployment never references an empty secret name.
 resource "google_secret_manager_secret_iam_member" "protocol_config_reader" {
+  depends_on = [google_project_service.required]
   count     = var.enable_protocol_gateway && var.protocol_runtime == "vm" && var.protocol_secret_name != "" ? 1 : 0
   project   = var.project_id
   secret_id = var.protocol_secret_name
@@ -329,6 +349,7 @@ resource "google_secret_manager_secret_iam_member" "protocol_config_reader" {
 }
 
 resource "google_secret_manager_secret_iam_member" "openvpn_config_reader" {
+  depends_on = [google_project_service.required]
   count     = var.enable_protocol_gateway && var.enable_openvpn ? 1 : 0
   project   = var.project_id
   secret_id = var.openvpn_secret_name
@@ -337,6 +358,7 @@ resource "google_secret_manager_secret_iam_member" "openvpn_config_reader" {
 }
 
 resource "google_compute_address" "protocol_vm" {
+  depends_on = [google_project_service.required]
   count        = var.enable_protocol_gateway ? 1 : 0
   name         = "${local.prefix}-protocol-ip"
   region       = var.region
@@ -436,6 +458,13 @@ resource "google_compute_firewall" "protocol_public" {
   direction     = "INGRESS"
   source_ranges = ["0.0.0.0/0"]
   target_tags   = ["${local.prefix}-protocol"]
+
+  lifecycle {
+    precondition {
+      condition     = length(var.protocol_tcp_ports) + length(var.protocol_udp_ports) > 0
+      error_message = "At least one protocol TCP or UDP port must be enabled."
+    }
+  }
 
   dynamic "allow" {
     for_each = length(var.protocol_tcp_ports) > 0 ? [1] : []
@@ -538,7 +567,8 @@ resource "google_compute_firewall" "tcp_health_checks" {
   name          = "${local.prefix}-allow-tcp-health-checks"
   network       = google_compute_network.gateway.name
   direction     = "INGRESS"
-  source_ranges = ["130.211.0.0/22", "35.191.0.0/16"]
+  # Health-check probe ranges for backend service-based external passthrough Network Load Balancers.
+  source_ranges = ["35.191.0.0/16", "209.85.152.0/22", "209.85.204.0/22"]
   target_tags   = ["${local.prefix}-gateway"]
 
   allow {
@@ -548,6 +578,7 @@ resource "google_compute_firewall" "tcp_health_checks" {
 }
 
 resource "google_compute_health_check" "vm" {
+  depends_on = [google_project_service.required]
   count               = local.create_gateway_vm ? 1 : 0
   name                = "${local.prefix}-vm-hc"
   check_interval_sec  = 10
@@ -562,6 +593,7 @@ resource "google_compute_health_check" "vm" {
 }
 
 resource "google_compute_region_health_check" "tcp_proxy" {
+  depends_on = [google_project_service.required]
   count               = local.enable_tcp_proxy ? 1 : 0
   name                = "${local.prefix}-tcp-hc"
   region              = var.region
@@ -573,6 +605,7 @@ resource "google_compute_region_health_check" "tcp_proxy" {
 }
 
 resource "google_compute_region_health_check" "tls_proxy" {
+  depends_on = [google_project_service.required]
   count               = local.enable_tcp_proxy ? 1 : 0
   name                = "${local.prefix}-tls-hc"
   region              = var.region
@@ -584,6 +617,7 @@ resource "google_compute_region_health_check" "tls_proxy" {
 }
 
 resource "google_compute_address" "tcp_proxy" {
+  depends_on = [google_project_service.required]
   count        = local.enable_tcp_proxy ? 1 : 0
   name         = "${local.prefix}-tcp-ip"
   region       = var.region
@@ -592,6 +626,7 @@ resource "google_compute_address" "tcp_proxy" {
 }
 
 resource "google_compute_address" "tls_proxy" {
+  depends_on = [google_project_service.required]
   count        = local.enable_tcp_proxy ? 1 : 0
   name         = "${local.prefix}-tls-ip"
   region       = var.region
@@ -652,6 +687,7 @@ resource "google_compute_forwarding_rule" "tls_proxy" {
 }
 
 resource "google_compute_security_policy" "edge" {
+  depends_on = [google_project_service.required]
   count       = local.use_lb ? 1 : 0
   name        = "${local.prefix}-edge-policy"
   description = "xgcpx source filtering, optional WAF, and per-client rate controls"
@@ -721,16 +757,22 @@ resource "google_compute_security_policy" "edge" {
 }
 
 resource "google_compute_global_address" "edge" {
+  depends_on = [google_project_service.required]
   count = local.use_lb ? 1 : 0
   name  = "${local.prefix}-global-ip"
 }
 
 resource "google_compute_managed_ssl_certificate" "edge" {
   count = local.use_lb ? 1 : 0
-  name  = "${local.prefix}-managed-cert"
+  # The name includes a hash of the domain, so a replacement can be created before the old one is removed.
+  name = "${local.prefix}-cert-${substr(md5(var.domain), 0, 6)}"
   managed {
     domains = [var.domain]
   }
+  lifecycle {
+    create_before_destroy = true
+  }
+  depends_on = [google_project_service.required]
 }
 
 resource "google_compute_region_network_endpoint_group" "cloud_run" {
@@ -746,8 +788,8 @@ resource "google_compute_backend_service" "cloud_run" {
   name                  = "${local.prefix}-run-backend"
   protocol              = "HTTP"
   load_balancing_scheme = "EXTERNAL_MANAGED"
-  # Match Cloud Run's 3600-second request limit so long-lived HTTP streams are not cut short at the edge.
-  timeout_sec     = 3600
+  # No timeout_sec: GCP rejects it for serverless NEG backends, whose timeout is fixed at 60 minutes,
+  # matching the Cloud Run request timeout (3600s) set on the service template.
   enable_cdn      = true
   security_policy = google_compute_security_policy.edge[0].id
 
