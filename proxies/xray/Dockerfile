@@ -3,14 +3,17 @@ FROM caddy:2-alpine
 ARG XRAY_VERSION=26.10.31
 ARG XRAY_SHA256=e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214
 
-RUN apk add --no-cache ca-certificates curl openssh-server python3 su-exec unzip \
+RUN apk add --no-cache ca-certificates curl openssh-server python3 su-exec tini unzip \
     && curl --fail --silent --show-error --location \
+      --retry 5 --retry-delay 3 --retry-connrefused --connect-timeout 15 \
       "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-64.zip" \
       --output /tmp/xray.zip \
     && echo "${XRAY_SHA256}  /tmp/xray.zip" | sha256sum -c - \
     && unzip -p /tmp/xray.zip xray > /usr/local/bin/xray \
     && chmod 0555 /usr/local/bin/xray \
-    && rm -f /tmp/xray.zip
+    && rm -f /tmp/xray.zip \
+    && mkdir -p /data /config /run/xgcpx /run/sshd \
+    && chown 10001:10001 /data /config
 
 COPY proxies/xray/Caddyfile /etc/caddy/Caddyfile
 COPY proxies/xray/Caddyfile.cloudrun /etc/caddy/Caddyfile.cloudrun
@@ -19,5 +22,6 @@ RUN chmod 0555 /usr/local/bin/xgcpx-xray-entrypoint
 
 COPY proxies/xray/sshd_config /etc/ssh/sshd_config
 USER 0:0
-EXPOSE 8080/tcp 8081/tcp 8082/tcp 8443/tcp 50052/tcp 8388/tcp 8388/udp 10007/tcp 10008/tcp 10009/tcp
-ENTRYPOINT ["/usr/local/bin/xgcpx-xray-entrypoint"]
+EXPOSE 8080/tcp 8081/tcp 8082/tcp 8443/tcp 50052/tcp 8388/tcp 8388/udp
+# tini reaps zombie processes and forwards SIGTERM so Cloud Run / Docker stop cleanly.
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/xgcpx-xray-entrypoint"]
