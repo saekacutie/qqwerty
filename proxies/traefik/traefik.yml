@@ -1,20 +1,44 @@
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+log:
+  level: WARN
+  format: json
 
 entryPoints:
   web:
     address: ":8080"
+    http2:
+      maxConcurrentStreams: 500
     transport:
       respondingTimeouts:
+        # No read/write deadline: tunnels and streaming bodies are long-lived (Cloud Run caps requests at 3600s).
         readTimeout: 0s
         writeTimeout: 0s
-        idleTimeout: 180s
+        # Must outlive the Google front end's keep-alive (~600s) or it reuses connections Traefik already closed.
+        idleTimeout: 650s
+      lifeCycle:
+        requestAcceptGraceTimeout: 0s
+        graceTimeOut: 8s
+
+serversTransport:
+  maxIdleConnsPerHost: 200
+  forwardingTimeouts:
+    dialTimeout: 10s
+    responseHeaderTimeout: 0s
+    # Drop idle upstream connections before the upstream does, so a request never reuses a dead socket.
+    idleConnTimeout: 30s
 
 providers:
   file:
     filename: /etc/traefik/dynamic.yml
-    watch: true
+    # The file is generated once at start-up; inotify is unreliable in some sandboxes.
+    watch: false
 
 accessLog:
   format: json
+  bufferingSize: 100
   fields:
     defaultMode: keep
 
@@ -24,6 +48,3 @@ api:
 ping:
   entryPoint: web
   manualRouting: true
-
-log:
-  level: INFO
