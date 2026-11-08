@@ -3,6 +3,42 @@
 	auto_https disable_redirects
 	http_port 8080
 	https_port 8443
+	servers {
+		# QUIC/HTTP3 would advertise UDP 8443, which is never published; keep clients on TCP.
+		protocols h1 h2
+		timeouts {
+			idle 30m
+		}
+	}
+}
+
+(ws_proxy) {
+	flush_interval -1
+}
+
+(h2c_proxy) {
+	flush_interval -1
+	transport http {
+		versions h2c 2
+		dial_timeout 5s
+	}
+}
+
+(xhttp_routes) {
+	@xhttp_packet path /xhttp-packet*
+	reverse_proxy @xhttp_packet 127.0.0.1:10004 {
+		import h2c_proxy
+	}
+
+	@xhttp_chunked path /xhttp-chunked*
+	reverse_proxy @xhttp_chunked 127.0.0.1:10005 {
+		import h2c_proxy
+	}
+
+	@xhttp_request_response path /xhttp-request-response*
+	reverse_proxy @xhttp_request_response 127.0.0.1:10006 {
+		import h2c_proxy
+	}
 }
 
 http://{$RELAY_DOMAIN} {
@@ -12,46 +48,41 @@ http://{$RELAY_DOMAIN} {
 {$RELAY_DOMAIN} {
 	route {
 		@grpc header Content-Type application/grpc*
-		reverse_proxy @grpc h2c://127.0.0.1:10003
-
-		@vless_ws path /vless-ws
-		reverse_proxy @vless_ws 127.0.0.1:10001
-
-		@vless_httpupgrade path /vless-httpupgrade
-		reverse_proxy @vless_httpupgrade 127.0.0.1:10002
-
-		@trojan_ws path /trojan-ws
-		reverse_proxy @trojan_ws 127.0.0.1:10007
-
-		@trojan_httpupgrade path /trojan-httpupgrade
-		reverse_proxy @trojan_httpupgrade 127.0.0.1:10010
-
-		@vmess_ws path /vmess-ws
-		reverse_proxy @vmess_ws 127.0.0.1:10008
-
-		@ssh_ws path /ssh-ws
-		reverse_proxy @ssh_ws 127.0.0.1:10009
-
-		@xhttp_packet path /xhttp-packet*
-		reverse_proxy @xhttp_packet 127.0.0.1:10004 {
-			transport http {
-				versions 2 h2c
-			}
+		reverse_proxy @grpc h2c://127.0.0.1:10003 {
+			flush_interval -1
 		}
 
-		@xhttp_chunked path /xhttp-chunked*
-		reverse_proxy @xhttp_chunked 127.0.0.1:10005 {
-			transport http {
-				versions 2 h2c
-			}
+		@vless_ws path /vless-ws*
+		reverse_proxy @vless_ws 127.0.0.1:10001 {
+			import ws_proxy
 		}
 
-		@xhttp_request_response path /xhttp-request-response*
-		reverse_proxy @xhttp_request_response 127.0.0.1:10006 {
-			transport http {
-				versions 2 h2c
-			}
+		@vless_httpupgrade path /vless-httpupgrade*
+		reverse_proxy @vless_httpupgrade 127.0.0.1:10002 {
+			import ws_proxy
 		}
+
+		@trojan_ws path /trojan-ws*
+		reverse_proxy @trojan_ws 127.0.0.1:10007 {
+			import ws_proxy
+		}
+
+		@trojan_httpupgrade path /trojan-httpupgrade*
+		reverse_proxy @trojan_httpupgrade 127.0.0.1:10010 {
+			import ws_proxy
+		}
+
+		@vmess_ws path /vmess-ws*
+		reverse_proxy @vmess_ws 127.0.0.1:10008 {
+			import ws_proxy
+		}
+
+		@ssh_ws path /ssh-ws*
+		reverse_proxy @ssh_ws 127.0.0.1:10009 {
+			import ws_proxy
+		}
+
+		import xhttp_routes
 
 		handle {
 			respond "not found" 404
@@ -59,36 +90,25 @@ http://{$RELAY_DOMAIN} {
 	}
 }
 
+# Direct xHTTP relay: host port 8080 -> container 8081.
 https://{$RELAY_DOMAIN}:8081 {
 	route {
-		@xhttp_packet path /xhttp-packet*
-		reverse_proxy @xhttp_packet 127.0.0.1:10004 {
-			transport http {
-				versions 2 h2c
-			}
-		}
-		@xhttp_chunked path /xhttp-chunked*
-		reverse_proxy @xhttp_chunked 127.0.0.1:10005 {
-			transport http {
-				versions 2 h2c
-			}
-		}
-		@xhttp_request_response path /xhttp-request-response*
-		reverse_proxy @xhttp_request_response 127.0.0.1:10006 {
-			transport http {
-				versions 2 h2c
-			}
-		}
+		import xhttp_routes
+
 		handle {
 			respond "not found" 404
 		}
 	}
 }
 
+# Direct gRPC relay: host port 50051 -> container 50052.
 https://{$RELAY_DOMAIN}:50052 {
 	route {
 		@grpc header Content-Type application/grpc*
-		reverse_proxy @grpc h2c://127.0.0.1:10003
+		reverse_proxy @grpc h2c://127.0.0.1:10003 {
+			flush_interval -1
+		}
+
 		handle {
 			respond "not found" 404
 		}
